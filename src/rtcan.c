@@ -22,6 +22,7 @@
  */
 static rtcan_status_t create_status(rtcan_handle_t* rtcan_h);
 static bool no_errors(rtcan_handle_t* rtcan_h);
+static uint32_t compute_hash(const uint32_t key);
 static void rtcan_thread_entry(ULONG input);
 
 static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
@@ -312,4 +313,25 @@ static bool no_errors(rtcan_handle_t* rtcan_h)
 static rtcan_status_t create_status(rtcan_handle_t* rtcan_h)
 {
     return (no_errors(rtcan_h)) ? RTCAN_OK : RTCAN_ERROR;
+}
+
+/**
+ * @brief   Computes a hash for a single word
+ * 
+ * @details This implements a Jenkins hash which was chosen for its balance 
+ *          between speed and distribution. The input data of CAN message
+ *          IDs is small.
+ */
+static uint32_t compute_hash(const uint32_ key)
+{
+    uint32_t hash = key;
+    hash += (hash << 12);
+    hash ^= (hash >> 22);
+    hash += (hash << 4);
+    hash ^= (hash >> 9);
+    hash += (hash << 10);
+    hash ^= (hash >> 2);
+    hash += (hash << 7);
+    hash ^= (hash >> 12);
+    return hash;
 }
