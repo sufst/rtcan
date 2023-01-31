@@ -6,7 +6,13 @@ RTCAN (Real-Time CAN) is a ThreadX RTOS service for managing concurrent access
 to CAN peripherals on STM32 microcontrollers.
 
 Features:
-- ...
+- Background thread based transmit service.
+- FIFO transmit queuing.
+
+Planned features:
+- "Subscription" style receiving functionality.
+- Automatic CAN filter configuration management.
+- Priority queueing for transmissions.
 
 ## Usage
 
