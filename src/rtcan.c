@@ -322,7 +322,7 @@ static rtcan_status_t create_status(rtcan_handle_t* rtcan_h)
  *          between speed and distribution. The input data of CAN message
  *          IDs is small.
  */
-static uint32_t compute_hash(const uint32_ key)
+static uint32_t compute_hash(const uint32_t key)
 {
     uint32_t hash = key;
     hash += (hash << 12);
