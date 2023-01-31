@@ -2,8 +2,8 @@
 
 ## About
 
-RTCAN (Real-Time CAN) is a ThreadX RTOS service for managing concurrent access 
-to CAN peripherals on STM32 microcontrollers.
+RTCAN (Real-Time CAN) is a [ThreadX RTOS](https://learn.microsoft.com/en-us/azure/rtos/threadx/overview-threadx) 
+service for managing concurrent access to CAN peripherals on [STM32 microcontrollers](https://www.st.com/en/microcontrollers-microprocessors/stm32-32-bit-arm-cortex-mcus.html).
 
 Features:
 - Background thread based transmit service.
@@ -13,6 +13,9 @@ Planned features:
 - "Subscription" style receiving functionality.
 - Automatic CAN filter configuration management.
 - Priority queueing for transmissions.
+
+Not currently supported:
+- STM32 FDCAN HAL.
 
 ## Usage
 
