@@ -14,7 +14,8 @@
 /*
  * thread constants
  */
-#define RTCAN_THREAD_NAME       "RTCAN Thread"
+#define RTCAN_THREAD_NAME        "RTCAN Thread"
+#define RTCAN_LISTENER_POOL_NAME "RTCAN Listener Memory Pool"
 #define RTCAN_THREAD_STACK_SIZE 512 // TODO: this needs to be profiled
 
 /*
@@ -112,6 +113,29 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
         }
     }
 
+    // clear hash table of listeners
+    if (no_errors(rtcan_h))
+    {
+        for (uint32_t i = 0; i < RTCAN_HASHMAP_SIZE; i++)
+        {
+            rtcan_h->listener_map[i] = NULL;
+        }
+    }
+
+    // create listener memory pool
+    if (no_errors(rtcan_h))
+    {
+        ULONG status = tx_byte_pool_create(&rtcan_h->listener_pool, 
+                                           RTCAN_LISTENER_POOL_NAME,
+                                           rtcan_h->listener_pool_mem,
+                                           RTCAN_LISTENER_POOL_SIZE);
+
+        if (status != TX_SUCCESS)
+        {
+            rtcan_h->err |= RTCAN_ERROR_INTERNAL;
+        }
+    }
+
     return create_status(rtcan_h);
 }
 
@@ -172,7 +196,7 @@ rtcan_status_t rtcan_transmit(rtcan_handle_t* rtcan_h, rtcan_msg_t* msg_ptr)
 
     if (tx_status != TX_SUCCESS)
     {
-        rtcan_h->err |= RTCAN_ERROR_QUEUE_FULL;
+        rtcan_h->err |= RTCAN_ERROR_MEMORY_FULL;
     }
 
     return create_status(rtcan_h);
@@ -198,6 +222,160 @@ rtcan_status_t rtcan_handle_tx_mailbox_callback(rtcan_handle_t* rtcan_h,
         if (tx_status != TX_SUCCESS)
         {
             rtcan_h->err |= RTCAN_ERROR_INTERNAL;
+        }
+    }
+
+    return create_status(rtcan_h);
+}
+
+/**
+ * @brief       Creates a hashmap node
+ * 
+ * @param[in]   rtcan_h     RTCAN handle
+ * @param[in]   can_id      CAN ID of node
+ */
+static rtcan_hashmap_node_t* create_hashmap_node(rtcan_handle_t* rtcan_h,   
+                                                 uint32_t can_id)
+{
+    rtcan_hashmap_node_t* new_node_ptr = NULL;
+
+    ULONG status = tx_byte_allocate(&rtcan_h->listener_pool, 
+                                    (void**) &new_node_ptr,
+                                    sizeof(rtcan_hashmap_node_t),
+                                    TX_NO_WAIT);
+
+    if (status == TX_SUCCESS)
+    {
+        new_node_ptr->chained_node_ptr = NULL;
+        new_node_ptr->can_id = can_id;
+    }
+    else
+    {
+        rtcan_h->err |= RTCAN_ERROR_MEMORY_FULL; // assume this is the error?
+    }
+
+    return new_node_ptr;
+}
+
+/**
+ * @brief       Creates a listener node
+ * 
+ * @param[in]   rtcan_h     RTCAN handle
+ * @param[in]   queue_ptr   Pointer to listener's associated queue
+ */
+static rtcan_listener_t* create_listener(rtcan_handle_t* rtcan_h,
+                                         TX_QUEUE* queue_ptr)
+{
+    rtcan_listener_t* new_listener_ptr = NULL;
+
+    ULONG status = tx_byte_allocate(&rtcan_h->listener_pool, 
+                                    (void**) &new_listener_ptr,
+                                    sizeof(rtcan_listener_t),
+                                    TX_NO_WAIT);
+
+    if (status == TX_SUCCESS)
+    {
+        new_listener_ptr->next_listener_ptr = NULL;
+        new_listener_ptr->queue_ptr = queue_ptr;
+    }
+    else
+    {
+        rtcan_h->err |= RTCAN_ERROR_MEMORY_FULL; // assume this is the error?
+    }
+    
+    return new_listener_ptr;
+}
+
+/**
+ * @brief   Appends a listener to an existing node in the hashmap
+ */
+
+/**
+ * @brief       Adds a subscriber which will receive notifications of incoming
+ *              CAN messages via a TX_QUEUE
+ * 
+ * @details     Hash collisions are handled by collision chaining with a singly
+ *              linked list. Each node in the hash map (or chain) consists
+ *              of a singly linked list of listeners for the given CAN ID.
+ * 
+ * @param[in]   rtcan_h     RTCAN handle
+ * @param[in]   can_id      CAN ID to receive notification for
+ * @param[in]   queue_ptr   Destination to receive messages
+ */
+rtcan_status_t rtcan_subscribe(rtcan_handle_t* rtcan_h,
+                               uint32_t can_id, 
+                               TX_QUEUE* queue_ptr)
+{
+    const uint32_t index = compute_hash(can_id) % RTCAN_HASHMAP_SIZE;
+
+    // first time for this CAN ID, no collision
+    if (rtcan_h->listener_map[index] == NULL)
+    {
+        rtcan_hashmap_node_t* new_node_ptr = create_hashmap_node(rtcan_h, can_id);
+
+        if (no_errors(rtcan_h))
+        {  
+            new_node_ptr->first_listener_ptr = create_listener(rtcan_h, queue_ptr);
+        }
+
+        if (no_errors(rtcan_h))
+        {
+            rtcan_h->listener_map[index] = new_node_ptr;
+        }
+    }
+    // hash collision, or another listener for an existing ID in the map
+    else
+    {
+        rtcan_hashmap_node_t* node_ptr = rtcan_h->listener_map[index];
+
+        if (node_ptr->can_id != can_id) // hash collision, do chaining
+        {
+            bool id_in_chain = false;
+
+            while (node_ptr->chained_node_ptr != NULL)
+            {
+                node_ptr = node_ptr->chained_node_ptr;
+
+                if (node_ptr->can_id == can_id)
+                {
+                    id_in_chain = true;
+                    break;
+                }
+            }
+
+            if (!id_in_chain) // create new chained node
+            {
+                node_ptr->chained_node_ptr = create_hashmap_node(rtcan_h, can_id);
+
+                if (no_errors(rtcan_h))
+                {
+                    node_ptr = node_ptr->chained_node_ptr;
+                    node_ptr->first_listener_ptr = create_listener(rtcan_h, queue_ptr);
+                }
+            }
+            else // add to existing node
+            {
+                rtcan_listener_t* listener_ptr = node_ptr->first_listener_ptr;
+
+                while (listener_ptr->next_listener_ptr != NULL)
+                {
+                    listener_ptr = listener_ptr->next_listener_ptr;
+                }
+
+                listener_ptr->next_listener_ptr = create_listener(rtcan_h, queue_ptr);
+            }
+
+        }
+        else // no collision, append to this node
+        {
+            rtcan_listener_t* listener_ptr = node_ptr->first_listener_ptr;
+
+            while (listener_ptr->next_listener_ptr != NULL)
+            {
+                listener_ptr = listener_ptr->next_listener_ptr;
+            }
+
+            listener_ptr->next_listener_ptr = create_listener(rtcan_h, queue_ptr);
         }
     }
 
