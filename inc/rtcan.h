@@ -26,8 +26,12 @@
     #define RTCAN_HASHMAP_SIZE  100 // default, number of items
 #endif
 
-#ifndef RTCAN_LISTENER_POOL_SIZE
-    #define RTCAN_LISTENER_POOL_SIZE (250 * sizeof(ULONG))
+#ifndef RTCAN_RX_MSG_POOL_SIZE
+    #define RTCAN_RX_MSG_POOL_SIZE 100 // default, number of items
+#endif
+
+#ifndef RTCAN_SUBSCRIBER_POOL_SIZE
+    #define RTCAN_SUBSCRIBER_POOL_SIZE (250 * sizeof(ULONG))
     // in bytes, must be multiple of sizeof(ULONG)
 #endif
 
@@ -41,24 +45,24 @@ typedef enum
 } rtcan_status_t;
 
 /**
- * @brief   Listener information for a CAN ID
+ * @brief   subscriber information for a CAN ID
  */
-typedef struct _rtcan_listener_t {
+typedef struct _rtcan_subscriber_t {
 
     /**
-     * @brief   Receive queue for listener
+     * @brief   Receive queue for subscriber
      */
     TX_QUEUE* queue_ptr;
 
     /**
-     * @brief   Next listener for given CAN ID
+     * @brief   Next subscriber for given CAN ID
      */
-    struct _rtcan_listener_t* next_listener_ptr;
+    struct _rtcan_subscriber_t* next_subscriber_ptr;
 
-} rtcan_listener_t;
+} rtcan_subscriber_t;
 
 /**
- * @brief   Listener node for hashmap of listeners
+ * @brief   subscriber node for hashmap of subscribers
  */
 typedef struct _rtcan_hashmap_node_t {
 
@@ -73,9 +77,9 @@ typedef struct _rtcan_hashmap_node_t {
     struct _rtcan_hashmap_node_t* chained_node_ptr;
 
     /**
-     * @brief   Singly linked list of listeners for given CAN ID
+     * @brief   Singly linked list of subscribers for given CAN ID
      */
-    rtcan_listener_t* first_listener_ptr;
+    rtcan_subscriber_t* first_subscriber_ptr;
 
 } rtcan_hashmap_node_t;
 
@@ -104,6 +108,16 @@ typedef struct
 
 } rtcan_msg_t;
 
+/**
+ * @brief   Reference counted RTCAN message
+ */
+typedef struct {
+
+    rtcan_msg_t message;
+    volatile uint32_t reference_count;
+
+} rtcan_refcounted_msg_t;
+
 /*
  * queue sizing constants
  */
@@ -111,15 +125,24 @@ typedef struct
 #define RTCAN_TX_QUEUE_ITEM_SIZE (sizeof(rtcan_msg_t) / sizeof(ULONG))
 #define RTCAN_TX_QUEUE_SIZE      (RTCAN_TX_QUEUE_LENGTH * RTCAN_TX_QUEUE_ITEM_SIZE)
 
+#define RTCAN_RX_NOTIF_QUEUE_LENGTH     10
+#define RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE  1 // one pointer = 1x ULONG
+#define RTCAN_RX_NOTIF_QUEUE_SIZE       (RTCAN_RX_NOTIF_QUEUE_LENGTH * RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE)
+
 /**
  * @brief RTCAN handle
  */
 typedef struct
 {
     /**
-     * @brief   Service thread
+     * @brief   Transmit service thread
      */
-    TX_THREAD thread;
+    TX_THREAD tx_thread;
+
+    /**
+     * @brief   Receive service thread
+     */
+    TX_THREAD rx_thread;
 
     /**
      * @brief   CAN handle dedicated to this instance
@@ -137,6 +160,19 @@ typedef struct
     TX_SEMAPHORE tx_mailbox_sem;
 
     /**
+     * @brief   Receive notification queue
+     * 
+     * @details Posted to in CAN interrupt. Items contain pointer to received
+     *          message allocated from Rx byte pool
+     */
+    TX_QUEUE rx_notif_queue;
+
+    /**
+     * @brief   Receive notification queue memory area
+     */
+    ULONG rx_notif_queue_mem[RTCAN_RX_NOTIF_QUEUE_SIZE];
+
+    /**
      * @brief   Transmit queue
      * 
      * @details Transmit queueing is currently FIFO based
@@ -149,19 +185,29 @@ typedef struct
     ULONG tx_queue_mem[RTCAN_TX_QUEUE_SIZE];
 
     /**
-     * @brief   Hashmap of listeners
+     * @brief   Hashmap of subscribers
      */
-    rtcan_hashmap_node_t* listener_map[RTCAN_HASHMAP_SIZE];
+    rtcan_hashmap_node_t* subscriber_map[RTCAN_HASHMAP_SIZE];
 
     /**
-     * @brief   Memory pool for listener data
+     * @brief   Byte pool for subscriber data
      */
-    TX_BYTE_POOL listener_pool;
+    TX_BYTE_POOL subscriber_pool;
 
     /**
-     * @brief   Memory area for listener data pool
+     * @brief   Memory area for subscriber data pool
      */
-    ULONG listener_pool_mem[RTCAN_LISTENER_POOL_SIZE / sizeof(ULONG)];
+    ULONG subscriber_pool_mem[RTCAN_SUBSCRIBER_POOL_SIZE / sizeof(ULONG)];
+
+    /**
+     * @brief   Block pool for received messages
+     */
+    TX_BLOCK_POOL rx_msg_pool;
+
+    /**
+     * @brief   Memory area for received message pool
+     */
+    rtcan_refcounted_msg_t rx_msg_pool_mem[RTCAN_RX_MSG_POOL_SIZE];
 
     /**
      * @brief   Current error code
@@ -184,6 +230,10 @@ rtcan_status_t rtcan_transmit(rtcan_handle_t* rtcan_h, rtcan_msg_t* msg_ptr);
 
 rtcan_status_t rtcan_handle_tx_mailbox_callback(rtcan_handle_t* rtcan_h,
                                                 const CAN_HandleTypeDef* can_h);
+
+rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h, 
+                                  const CAN_HandleTypeDef* can_h,
+                                  const uint32_t rx_fifo);
 
 rtcan_status_t rtcan_subscribe(rtcan_handle_t* rtcan_h,
                                uint32_t can_id, 
