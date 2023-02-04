@@ -67,6 +67,20 @@ The `rtcan_transmit()` function uses a simple FIFO queueing system to transmit
 messages with the CAN peripheral. This provides a way of ensuring that there is 
 not contention for the CAN peripheral by multiple threads. 
 
+To use the transmit service, CAN Tx interrupts must be enabled and the 
+`HAL_CAN_TxMailbox<N>CompleteCallback` must be implemented to call 
+`rtcan_handle_tx_mailbox_callback` (for all `N`). For example, for the
+HAL callback for Tx mailbox 1:
+
+```c
+static rtcan_handle_t rtcan;
+
+void HAL_CAN_TxMailbox1CompleteCallback(CAN_HandleTypeDef* can_h)
+{
+    rtcan_handle_tx_mailbox_callback(&rtcan, can_h);
+}
+```
+
 ### Receiving and Subscriptions
 
 Receiving functionality in RTCAN is based around a "publisher" / "subscriber"
@@ -77,11 +91,24 @@ size `TX_1_ULONG`. Incoming CAN messages are published to the queue by the RTCAN
 service, where each queue item is a pointer to the received message represented 
 as an `rtcan_msg_t` struct. Once a subscriber has finished with a message, it 
 **must** call the `rtcan_consumed()` function to indicate this to the service.
-
 Internally `rtcan_msg_t` is a reference counted, dynamically allocated data
 structure which is distributed to all the subscribers of a given CAN ID. 
 As such, subscribers must treat this message as **read only** and should
 not modify the `reference_count` field.
+
+To use the receive service, CAN Rx interrupts must be enabled and the 
+`HAL_CAN_RxFifo<N>MsgPendingCallback` must be implemented to call 
+`rtcan_handle_rx_it` (for all `N`). For example, for the
+HAL callback for Rx FIFO 1:
+
+```c
+static rtcan_handle_t rtcan;
+
+void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* can_h)
+{
+    rtcan_handle_rx_it(&rtcan, can_h, 1);
+}
+```
 
 ### Error Codes
 
