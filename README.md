@@ -244,6 +244,10 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* can_h)
 
 ```
 
+> Checking of return codes has been omitted here for brevity. In practice,
+  you should always check the return codes of both ThreadX and RTCAN 
+  functions.
+
 ## Other Platforms
 
 This implementation was developed for the STM32 platform, however it should be
