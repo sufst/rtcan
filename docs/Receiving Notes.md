@@ -35,7 +35,30 @@ This was implemented as follows:
 - All data which is added to the table is dynamically allocated from a byte
   pool. The size of this pool limits the maximum number of subscriptions which
   can be made.
+  
+## Received Message Pool
 
+-  Received messages are stored in a [ThreadX block pool](https://learn.microsoft.com/en-us/azure/rtos/threadx/appendix-a#block-memory-services).
+- This allows space for a message to be dynamically allocated in the CAN ISR 
+  (this is not possible with byte pools), however the message size allocated
+  has to be large enough for the biggest possible CAN message when working
+  with block pools.
+- Received messages stored in the block pool are distributed to all subscribers
+  of that CAN ID. Subscribers receive a **pointer** to the message in the pool
+  which prevents unnecessary copying of the message. This does mean that messages
+  should be treated as read-only by subscribers, but a copy can be made in the
+  rare cases where a subscriber wants to modify the message.
+- Each message has a ["reference count"](https://en.wikipedia.org/wiki/Reference_counting)
+  which is initially equal to the number of subscribers to that message. When
+  a subscriber has finished with the received message, it must call the
+  `rtcan_consumed()` function to indicate this and decrement the reference
+  count. When the reference count reaches zero, the message can be deleted from
+  the block pool to free the memory.
+- Note that ideally, subscribers should consume messages as quickly as possible
+  to free up the block again for other messages. The size of the block pool
+  should have enough overhead that it doesn't repeatedly run out of memory.
+  The specific behaviour and requirements here will depend on the application's
+  use of RTCAN and received messages.
 
 ## Tradeoffs / Limitations / Other Options
 
