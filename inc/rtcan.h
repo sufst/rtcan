@@ -106,17 +106,13 @@ typedef struct
      */
     uint32_t length;
 
-} rtcan_msg_t;
-
-/**
- * @brief   Reference counted RTCAN message
- */
-typedef struct {
-
-    rtcan_msg_t message;
+    /**
+     * @brief   Reference count for dynamically allocated messages with multiple
+     *          subscribers
+     */
     volatile uint32_t reference_count;
 
-} rtcan_refcounted_msg_t;
+} rtcan_msg_t;
 
 /*
  * queue sizing constants
@@ -207,7 +203,7 @@ typedef struct
     /**
      * @brief   Memory area for received message pool
      */
-    rtcan_refcounted_msg_t rx_msg_pool_mem[RTCAN_RX_MSG_POOL_SIZE];
+    rtcan_msg_t rx_msg_pool_mem[RTCAN_RX_MSG_POOL_SIZE];
 
     /**
      * @brief   Current error code
@@ -238,6 +234,9 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
 rtcan_status_t rtcan_subscribe(rtcan_handle_t* rtcan_h,
                                uint32_t can_id, 
                                TX_QUEUE* queue_ptr);
+
+rtcan_status_t rtcan_msg_consumed(rtcan_handle_t* rtcan_h,
+                                  rtcan_msg_t* msg_ptr);
 
 uint32_t rtcan_get_error(rtcan_handle_t* rtcan_h);
 

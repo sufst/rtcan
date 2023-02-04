@@ -171,9 +171,9 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
     {
         UINT tx_status = tx_block_pool_create(&rtcan_h->rx_msg_pool,
                                               "RTCAN Rx Message Pool",
-                                              sizeof(rtcan_refcounted_msg_t),
+                                              sizeof(rtcan_msg_t),
                                               rtcan_h->rx_msg_pool_mem,
-                                              sizeof(rtcan_refcounted_msg_t) * RTCAN_RX_MSG_POOL_SIZE);
+                                              sizeof(rtcan_msg_t) * RTCAN_RX_MSG_POOL_SIZE);
 
         ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
     }
@@ -185,7 +185,7 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
         filter.FilterActivation = ENABLE;
         filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
         filter.FilterIdHigh = 0x0100 << 5U;
-        filter.FilterIdLow = 0x0101 << 5U;
+        filter.FilterIdLow = 0x0101 << 5U; // TODO: temporary test!
         filter.FilterMaskIdHigh = 0x0000 << 5U;
         filter.FilterMaskIdLow = 0x0000 << 5U;
         filter.FilterMode = CAN_FILTERMODE_IDLIST;
@@ -588,7 +588,7 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
     //                             TX_NO_WAIT);
 
     // allocate message
-    rtcan_refcounted_msg_t* msg_ptr;
+    rtcan_msg_t* msg_ptr;
 
     UINT tx_status = tx_block_allocate(&rtcan_h->rx_msg_pool,
                                        (void**) &msg_ptr,
@@ -604,12 +604,12 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
         HAL_StatusTypeDef hal_status = HAL_CAN_GetRxMessage(rtcan_h->hcan,
                                                             rx_fifo,
                                                             &header,
-                                                            msg_ptr->message.data);
+                                                            msg_ptr->data);
 
         if (hal_status == HAL_OK)
         {
-            msg_ptr->message.identifier = header.StdId;
-            msg_ptr->message.length = header.DLC;
+            msg_ptr->identifier = header.StdId;
+            msg_ptr->length = header.DLC;
             msg_ptr->reference_count = 0;
         }
         else 
@@ -634,6 +634,30 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
 }
 
 /**
+ * @brief       Call after message received via subscription has been used
+ * 
+ * @note        If this is not done, RTCAN will eventually run out of memory to
+ *              store CAN messages!
+ * 
+ * @param[in]   rtcan_h     RTCAN handle
+ * @param[in]   msg_ptr     Pointer to message
+ */
+rtcan_status_t rtcan_msg_consumed(rtcan_handle_t* rtcan_h,
+                                  rtcan_msg_t* msg_ptr)
+{
+    (void) rtcan_h;
+
+    msg_ptr->reference_count--;
+
+    if (msg_ptr->reference_count == 0)
+    {
+        tx_block_release(msg_ptr);
+    }
+
+    return RTCAN_OK;
+}
+
+/**
  * @brief       Entry function for RTCAN receive service thread
  * 
  * @param[in]   input   RTCAN handler
@@ -645,7 +669,7 @@ static void rtcan_rx_thread_entry(ULONG input)
     while (1)
     {
         // wait for message
-        rtcan_refcounted_msg_t* msg_ptr;
+        rtcan_msg_t* msg_ptr;
 
         UINT tx_status = tx_queue_receive(&rtcan_h->rx_notif_queue,
                                           (void*) &msg_ptr,
@@ -657,7 +681,7 @@ static void rtcan_rx_thread_entry(ULONG input)
         if (no_errors(rtcan_h))
         {
             rtcan_hashmap_node_t* node_ptr = find_hashmap_node(rtcan_h,
-                                                               msg_ptr->message.identifier);
+                                                               msg_ptr->identifier);
 
             if (node_ptr != NULL)
             {
