@@ -90,7 +90,7 @@ Threads must provide a queue as an endpoint for messages where queue items have
 size `TX_1_ULONG`. Incoming CAN messages are published to the queue by the RTCAN
 service, where each queue item is a pointer to the received message represented 
 as an `rtcan_msg_t` struct. Once a subscriber has finished with a message, it 
-**must** call the `rtcan_consumed()` function to indicate this to the service.
+**must** call the `rtcan_msg_consumed()` function to indicate this to the service.
 Internally `rtcan_msg_t` is a reference counted, dynamically allocated data
 structure which is distributed to all the subscribers of a given CAN ID. 
 As such, subscribers must treat this message as **read only** and should
