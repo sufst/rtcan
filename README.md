@@ -1,5 +1,7 @@
 # RTCAN
 
+> :warning: This system is in early development. It is functional at a basic level, but expect bugs!
+
 ## About
 
 RTCAN (Real-Time CAN) is a [ThreadX RTOS](https://learn.microsoft.com/en-us/azure/rtos/threadx/overview-threadx) 
