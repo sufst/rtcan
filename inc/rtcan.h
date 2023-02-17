@@ -122,7 +122,7 @@ typedef struct
 #define RTCAN_TX_QUEUE_SIZE      (RTCAN_TX_QUEUE_LENGTH * RTCAN_TX_QUEUE_ITEM_SIZE)
 
 #define RTCAN_RX_NOTIF_QUEUE_LENGTH     10
-#define RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE  1 // one pointer = 1x ULONG
+#define RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE  (sizeof(rtcan_msg_t*) / sizeof(ULONG)) // one pointer = 1x ULONG
 #define RTCAN_RX_NOTIF_QUEUE_SIZE       (RTCAN_RX_NOTIF_QUEUE_LENGTH * RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE)
 
 /**
