@@ -1,4 +1,4 @@
-/***************************************************************************
+/***************************************************************************define
  * @file   rtcan.h
  * @author Tim Brewis (@t-bre, tab1g19@soton.ac.uk)
  * @brief  RTOS wrapper around CAN bus
@@ -16,11 +16,11 @@
 /*
  * error codes
  */
-#define RTCAN_ERROR_NONE 0x00000000U // no error
-#define RTCAN_ERROR_INIT 0x00000001U // failed to start service
-#define RTCAN_ERROR_ARG  0x00000002U // invalid argument
-#define RTCAN_ERROR_MEMORY_FULL 0x00000004U // not enough memory for operation
-#define RTCAN_ERROR_INTERNAL 0x80000000U // internal error
+#define _RTCAN_ERROR_NONE 0x00000000U // no error
+#define _RTCAN_ERROR_INIT 0x00000001U // failed to start service
+#define _RTCAN_ERROR_ARG  0x00000002U // invalid argument
+#define _RTCAN_ERROR_MEMORY_FULL 0x00000004U // not enough memory for operation
+#define _RTCAN_ERROR_INTERNAL 0x80000000U // internal error
 
 #ifndef RTCAN_HASHMAP_SIZE
     #define RTCAN_HASHMAP_SIZE  100 // default, number of items
@@ -117,13 +117,16 @@ typedef struct
 /*
  * queue sizing constants
  */
-#define RTCAN_TX_QUEUE_LENGTH    100
-#define RTCAN_TX_QUEUE_ITEM_SIZE (sizeof(rtcan_msg_t) / sizeof(ULONG))
-#define RTCAN_TX_QUEUE_SIZE      (RTCAN_TX_QUEUE_LENGTH * RTCAN_TX_QUEUE_ITEM_SIZE)
+#define _RTCAN_TX_QUEUE_LENGTH    100
+#define _RTCAN_TX_QUEUE_ITEM_SIZE (sizeof(rtcan_msg_t) / sizeof(ULONG))
+#define _RTCAN_TX_QUEUE_SIZE      (_RTCAN_TX_QUEUE_LENGTH * _RTCAN_TX_QUEUE_ITEM_SIZE)
 
-#define RTCAN_RX_NOTIF_QUEUE_LENGTH     10
-#define RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE  (sizeof(rtcan_msg_t*) / sizeof(ULONG)) // one pointer = 1x ULONG
-#define RTCAN_RX_NOTIF_QUEUE_SIZE       (RTCAN_RX_NOTIF_QUEUE_LENGTH * RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE)
+//user constant
+#define RTCAN_RX_QUEUE_ITEM_SIZE (sizeof(rtcan_msg_t*) / sizeof(ULONG))
+
+#define _RTCAN_RX_NOTIF_QUEUE_LENGTH     10
+#define _RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE (RTCAN_RX_QUEUE_ITEM_SIZE)
+#define _RTCAN_RX_NOTIF_QUEUE_SIZE       (_RTCAN_RX_NOTIF_QUEUE_LENGTH * _RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE)
 
 /**
  * @brief RTCAN handle
@@ -166,7 +169,7 @@ typedef struct
     /**
      * @brief   Receive notification queue memory area
      */
-    ULONG rx_notif_queue_mem[RTCAN_RX_NOTIF_QUEUE_SIZE];
+    ULONG rx_notif_queue_mem[_RTCAN_RX_NOTIF_QUEUE_SIZE];
 
     /**
      * @brief   Transmit queue
@@ -178,7 +181,7 @@ typedef struct
     /**
      * @brief   Transmit queue memory area
      */
-    ULONG tx_queue_mem[RTCAN_TX_QUEUE_SIZE];
+    ULONG tx_queue_mem[_RTCAN_TX_QUEUE_SIZE];
 
     /**
      * @brief   Hashmap of subscribers

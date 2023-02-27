@@ -14,12 +14,12 @@
 /*
  * thread constants
  */
-#define RTCAN_THREAD_STACK_SIZE 1024 // TODO: this needs to be profiled
+#define _RTCAN_THREAD_STACK_SIZE 1024 // TODO: this needs to be profiled
 
 /*
  * useful macros
  */
-#define ADD_ERROR_IF(cond, error, inst) if(cond) { inst->err |= error; }
+#define _ADD_ERROR_IF(cond, error, inst) if(cond) { inst->err |= error; }
 
 /*
  * internal functions
@@ -55,17 +55,17 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
                           TX_BYTE_POOL* stack_pool_ptr)
 {
     rtcan_h->hcan = hcan;
-    rtcan_h->err = RTCAN_ERROR_NONE;
+    rtcan_h->err = _RTCAN_ERROR_NONE;
 
     // threads
     void* stack_ptr = NULL;
 
     UINT tx_status = tx_byte_allocate(stack_pool_ptr,
                                       &stack_ptr,
-                                      RTCAN_THREAD_STACK_SIZE,
+                                      _RTCAN_THREAD_STACK_SIZE,
                                       TX_NO_WAIT);
 
-    ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
+    _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INIT, rtcan_h);
 
     if (no_errors(rtcan_h))
     {
@@ -74,23 +74,23 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
                                      rtcan_tx_thread_entry,
                                      (ULONG) rtcan_h,
                                      stack_ptr,
-                                     RTCAN_THREAD_STACK_SIZE,
+                                     _RTCAN_THREAD_STACK_SIZE,
                                      priority,
                                      priority,
                                      TX_NO_TIME_SLICE,
                                      TX_DONT_START);
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INIT, rtcan_h);
     }
 
     if (no_errors(rtcan_h))
     {
         tx_status = tx_byte_allocate(stack_pool_ptr,
                                      &stack_ptr,
-                                     RTCAN_THREAD_STACK_SIZE,
+                                     _RTCAN_THREAD_STACK_SIZE,
                                      TX_NO_WAIT);
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INIT, rtcan_h);
     }
 
     if (no_errors(rtcan_h))
@@ -100,13 +100,13 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
                                      rtcan_rx_thread_entry,
                                      (ULONG) rtcan_h,
                                      stack_ptr,
-                                     RTCAN_THREAD_STACK_SIZE,
+                                     _RTCAN_THREAD_STACK_SIZE,
                                      priority,
                                      priority,
                                      TX_NO_TIME_SLICE,
                                      TX_DONT_START);
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INIT, rtcan_h);
     }
 
     // transmit queue
@@ -114,11 +114,11 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
     {
         tx_status = tx_queue_create(&rtcan_h->tx_queue,
                                     "RTCAN Transmit Queue",
-                                    RTCAN_TX_QUEUE_ITEM_SIZE,
+                                    _RTCAN_TX_QUEUE_ITEM_SIZE,
                                     rtcan_h->tx_queue_mem,
-                                    RTCAN_TX_QUEUE_SIZE * sizeof(ULONG));
+                                    _RTCAN_TX_QUEUE_SIZE * sizeof(ULONG));
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INIT, rtcan_h);
     }
 
     // transmit mailbox semaphore
@@ -131,7 +131,7 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
         tx_status
             = tx_semaphore_create(&rtcan_h->tx_mailbox_sem, NULL, mailbox_size);
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INTERNAL, rtcan_h);
     }
 
     // receive notification queue
@@ -139,11 +139,11 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
     {
         tx_status = tx_queue_create(&rtcan_h->rx_notif_queue,
                                     "RTCAN Receive Notification Queue",
-                                    RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE,
+                                    _RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE,
                                     rtcan_h->rx_notif_queue_mem,
-                                    RTCAN_RX_NOTIF_QUEUE_SIZE * sizeof(ULONG));
+                                    _RTCAN_RX_NOTIF_QUEUE_SIZE * sizeof(ULONG));
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INTERNAL, rtcan_h);
     }
 
     // clear hash table of subscribers
@@ -163,7 +163,7 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
                                              rtcan_h->subscriber_pool_mem,
                                              RTCAN_SUBSCRIBER_POOL_SIZE);
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INTERNAL, rtcan_h);
     }
 
     // create rx message memory pool
@@ -175,7 +175,7 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
                                               rtcan_h->rx_msg_pool_mem,
                                               sizeof(rtcan_msg_t) * RTCAN_RX_MSG_POOL_SIZE);
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INTERNAL, rtcan_h);
     }
 
     // TODO: configure CAN filters (allow one through for test)
@@ -195,7 +195,7 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
         HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
                                                             &filter);
 
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+        _ADD_ERROR_IF(hal_status != HAL_OK, _RTCAN_ERROR_INIT, rtcan_h);
     }
 
     return create_status(rtcan_h);
@@ -213,7 +213,7 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
     for (uint32_t i = 0; i < 2; i++)
     {
         UINT tx_status = tx_thread_resume(threads[i]);
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INIT, rtcan_h);
     }
 
     // start peripheral
@@ -227,14 +227,14 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
             = HAL_CAN_ActivateNotification(rtcan_h->hcan,
                                            notifs);
 
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+        _ADD_ERROR_IF(hal_status != HAL_OK, _RTCAN_ERROR_INIT, rtcan_h);
     }
 
     if (no_errors(rtcan_h))
     {
         HAL_StatusTypeDef hal_status = HAL_CAN_Start(rtcan_h->hcan);
 
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+        _ADD_ERROR_IF(hal_status != HAL_OK, _RTCAN_ERROR_INIT, rtcan_h);
     }
 
     return create_status(rtcan_h);
@@ -256,7 +256,7 @@ rtcan_status_t rtcan_transmit(rtcan_handle_t* rtcan_h, rtcan_msg_t* msg_ptr)
     UINT tx_status
         = tx_queue_send(&rtcan_h->tx_queue, (void*) msg_ptr, TX_NO_WAIT);
 
-    ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
+    _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_MEMORY_FULL, rtcan_h);
 
     return create_status(rtcan_h);
 }
@@ -278,7 +278,7 @@ rtcan_status_t rtcan_handle_tx_mailbox_callback(rtcan_handle_t* rtcan_h,
     {
         UINT tx_status = tx_semaphore_put(&rtcan_h->tx_mailbox_sem);
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INTERNAL, rtcan_h);
     }
 
     return create_status(rtcan_h);
@@ -301,13 +301,13 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
 {
     if ((data_ptr == NULL) || (data_length == 0U))
     {
-        rtcan_h->err |= RTCAN_ERROR_ARG;
+        rtcan_h->err |= _RTCAN_ERROR_ARG;
     }
 
     if (tx_semaphore_get(&rtcan_h->tx_mailbox_sem, TX_WAIT_FOREVER)
         != TX_SUCCESS)
     {
-        rtcan_h->err |= RTCAN_ERROR_INTERNAL;
+        rtcan_h->err |= _RTCAN_ERROR_INTERNAL;
     }
 
     if (no_errors(rtcan_h))
@@ -330,7 +330,7 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
 
         if (hal_status != HAL_OK)
         {
-            rtcan_h->err |= RTCAN_ERROR_INTERNAL;
+            rtcan_h->err |= _RTCAN_ERROR_INTERNAL;
         }
     }
 
@@ -414,7 +414,7 @@ static rtcan_hashmap_node_t* create_hashmap_node(rtcan_handle_t* rtcan_h,
                                     sizeof(rtcan_hashmap_node_t),
                                     TX_NO_WAIT);
 
-    ADD_ERROR_IF(status != TX_SUCCESS, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
+    _ADD_ERROR_IF(status != TX_SUCCESS, _RTCAN_ERROR_MEMORY_FULL, rtcan_h);
 
     if (no_errors(rtcan_h))
     {
@@ -441,7 +441,7 @@ static rtcan_subscriber_t* create_subscriber(rtcan_handle_t* rtcan_h,
                                     sizeof(rtcan_subscriber_t),
                                     TX_NO_WAIT);
 
-    ADD_ERROR_IF(status != TX_SUCCESS, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
+    _ADD_ERROR_IF(status != TX_SUCCESS, _RTCAN_ERROR_MEMORY_FULL, rtcan_h);
 
     if (no_errors(rtcan_h))
     {
@@ -594,7 +594,7 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
                                        (void**) &msg_ptr,
                                        TX_NO_WAIT);
 
-    ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
+    _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_MEMORY_FULL, rtcan_h);
 
     // retrieve message
     if (no_errors(rtcan_h))
@@ -617,7 +617,7 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
             tx_block_release(msg_ptr);
         }
 
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INTERNAL, rtcan_h);
+        _ADD_ERROR_IF(hal_status != HAL_OK, _RTCAN_ERROR_INTERNAL, rtcan_h);
     }
 
     // send to Rx thread for distribution
@@ -627,7 +627,7 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
                                   (void*) &msg_ptr,
                                   TX_NO_WAIT);
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_MEMORY_FULL, rtcan_h);
     }
 
     return create_status(rtcan_h);
@@ -675,7 +675,7 @@ static void rtcan_rx_thread_entry(ULONG input)
                                           (void*) &msg_ptr,
                                           TX_WAIT_FOREVER);
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
+        _ADD_ERROR_IF(tx_status != TX_SUCCESS, _RTCAN_ERROR_INTERNAL, rtcan_h);
 
         // distribute
         if (no_errors(rtcan_h))
@@ -736,7 +736,7 @@ uint32_t rtcan_get_error(rtcan_handle_t* rtcan_h)
  */
 static bool no_errors(rtcan_handle_t* rtcan_h)
 {
-    return (rtcan_h->err == RTCAN_ERROR_NONE);
+    return (rtcan_h->err == _RTCAN_ERROR_NONE);
 }
 
 /**
