@@ -113,6 +113,24 @@ void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* can_h)
 }
 ```
 
+### CAN Errors
+
+If CAN transmit errors occur, RTCAN must be notified through the `rtcan_handle_hal_error()`
+function when `HAL_CAN_ErrorCallback()` is called.
+
+```c
+static rtcan_handle_t rtcan;
+
+void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* can_h)
+{
+    rtcan_handle_hal_error(&rtcan, can_h);
+}
+```
+
+Failure to do so will mean the RTCAN transmit service is no longer able to
+transmit messages. Note that it is not necessary to check that the CAN handle
+matches that of the RTCAN instance, this is done automatically by RTCAN.
+
 ### Error Codes
 
 All functions in the RTCAN API return a status code (`rtcan_status_t`) 
