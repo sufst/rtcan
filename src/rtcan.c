@@ -56,6 +56,7 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
 {
     rtcan_h->hcan = hcan;
     rtcan_h->err = RTCAN_ERROR_NONE;
+    atomic_store(&rtcan_h->rx_ready, true);
 
     // threads
     void* stack_ptr = NULL;
@@ -178,17 +179,17 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
         ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
     }
 
-    // TODO: configure CAN filters (allow one through for test)
+    // TODO: configure CAN filters
     if (no_errors(rtcan_h))
     {
         CAN_FilterTypeDef filter;
         filter.FilterActivation = ENABLE;
         filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        filter.FilterIdHigh = 0x0100 << 5U;
-        filter.FilterIdLow = 0x0101 << 5U; // TODO: temporary test!
+        filter.FilterIdHigh = 0x0000 << 5U;
+        filter.FilterIdLow = 0x0000 << 5U;
         filter.FilterMaskIdHigh = 0x0000 << 5U;
         filter.FilterMaskIdLow = 0x0000 << 5U;
-        filter.FilterMode = CAN_FILTERMODE_IDLIST;
+        filter.FilterMode = CAN_FILTERMODE_IDMASK;
         filter.FilterScale = CAN_FILTERSCALE_16BIT;
         filter.FilterBank = 0;
 
@@ -581,14 +582,17 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
                                   const CAN_HandleTypeDef* can_h,
                                   const uint32_t rx_fifo)
 {
-    // ULONG queue_item = rx_fifo;
-
-    // UINT status = tx_queue_send(&rtcan_h->rx_notif_queue,
-    //                             (void*) &queue_item,
-    //                             TX_NO_WAIT);
+    if (!atomic_load(&rtcan_h->rx_ready))
+    {
+        HAL_CAN_GetRxMessage(rtcan_h->hcan,
+                             rx_fifo,
+                             NULL,
+                             NULL);
+        return RTCAN_OK;
+    }
 
     // allocate message
-    rtcan_msg_t* msg_ptr;
+    rtcan_msg_t* msg_ptr = NULL;
 
     UINT tx_status = tx_block_allocate(&rtcan_h->rx_msg_pool,
                                        (void**) &msg_ptr,
@@ -668,6 +672,8 @@ static void rtcan_rx_thread_entry(ULONG input)
 
     while (1)
     {
+        atomic_store(&rtcan_h->rx_ready, true);
+
         // wait for message
         rtcan_msg_t* msg_ptr;
 
@@ -715,6 +721,50 @@ static void rtcan_rx_thread_entry(ULONG input)
             }
         }
     }
+}
+
+//======================================================================== error
+
+/**
+ * @brief       Handles HAL CAN errors
+ * 
+ * @param[in]   rtcan_h     RTCAN handle
+ * @param[in]   can_h       CAN handle
+ */
+rtcan_status_t rtcan_handle_hal_error(rtcan_handle_t* rtcan_h,
+                                      CAN_HandleTypeDef* can_h)
+{
+    rtcan_status_t status = RTCAN_OK;
+
+    if (can_h == rtcan_h->hcan)
+    {
+        const uint32_t tx_errors[] = {
+            HAL_CAN_ERROR_TX_TERR0,
+            HAL_CAN_ERROR_TX_TERR1,
+            HAL_CAN_ERROR_TX_TERR2,
+            HAL_CAN_ERROR_TX_ALST0,
+            HAL_CAN_ERROR_TX_ALST1,
+            HAL_CAN_ERROR_TX_ALST2,
+        };
+
+        uint32_t error = HAL_CAN_GetError(rtcan_h->hcan);
+        bool error_handled = false;
+
+        for (uint32_t i = 0; i < sizeof(tx_errors)/sizeof(tx_errors[0]); i++)
+        {
+            if (error == tx_errors[i])
+            {
+                tx_semaphore_put(&rtcan_h->tx_mailbox_sem);
+                error_handled = true;
+                break;
+            }
+        }
+
+        // unhandled/unknown errors
+        ADD_ERROR_IF(!error_handled, RTCAN_ERROR_INTERNAL, rtcan_h);
+    }
+
+    return status;
 }
 
 //====================================================================== utility

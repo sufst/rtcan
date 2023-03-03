@@ -7,10 +7,11 @@
 #ifndef RTCAN_H
 #define RTCAN_H
 
+#include <stdatomic.h>
+#include <stdbool.h>
+
 #include "tx_api.h"
-
 #include "rtcan.h"
-
 #include "can.h"
 
 /*
@@ -27,7 +28,7 @@
 #endif
 
 #ifndef RTCAN_RX_MSG_POOL_SIZE
-    #define RTCAN_RX_MSG_POOL_SIZE 100 // default, number of items
+    #define RTCAN_RX_MSG_POOL_SIZE 1000 // default, number of items
 #endif
 
 #ifndef RTCAN_SUBSCRIBER_POOL_SIZE
@@ -117,7 +118,7 @@ typedef struct
 /*
  * queue sizing constants
  */
-#define RTCAN_TX_QUEUE_LENGTH    100
+#define RTCAN_TX_QUEUE_LENGTH    10
 #define RTCAN_TX_QUEUE_ITEM_SIZE (sizeof(rtcan_msg_t) / sizeof(ULONG))
 #define RTCAN_TX_QUEUE_SIZE      (RTCAN_TX_QUEUE_LENGTH * RTCAN_TX_QUEUE_ITEM_SIZE)
 
@@ -210,6 +211,11 @@ typedef struct
      */
     uint32_t err;
 
+    /**
+     * @brief   Flag for Rx service being ready
+     */
+    atomic_bool rx_ready;
+
 } rtcan_handle_t;
 
 /*
@@ -237,6 +243,9 @@ rtcan_status_t rtcan_subscribe(rtcan_handle_t* rtcan_h,
 
 rtcan_status_t rtcan_msg_consumed(rtcan_handle_t* rtcan_h,
                                   rtcan_msg_t* msg_ptr);
+
+rtcan_status_t rtcan_handle_hal_error(rtcan_handle_t* rtcan_h,
+                                      CAN_HandleTypeDef* can_h);
 
 uint32_t rtcan_get_error(rtcan_handle_t* rtcan_h);
 

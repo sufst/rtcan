@@ -22,6 +22,7 @@ Not currently supported:
 
 ## Dependencies
 
+- C11 compiler.
 - 32 bit STM32 microcontroller.
 - ThreadX memory pool, thread, semaphore and queue services.
 - STM32 Hardware Abstraction Layer (HAL) CAN drivers.
