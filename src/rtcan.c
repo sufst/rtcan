@@ -56,7 +56,7 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
 {
     rtcan_h->hcan = hcan;
     rtcan_h->err = RTCAN_ERROR_NONE;
-    rtcan_h->rx_ready = false;
+    atomic_store(&rtcan_h->rx_ready, true);
 
     // threads
     void* stack_ptr = NULL;
@@ -582,7 +582,7 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
                                   const CAN_HandleTypeDef* can_h,
                                   const uint32_t rx_fifo)
 {
-    if (!rtcan_h->rx_ready)
+    if (!atomic_load(&rtcan_h->rx_ready))
     {
         HAL_CAN_GetRxMessage(rtcan_h->hcan,
                              rx_fifo,
@@ -672,7 +672,7 @@ static void rtcan_rx_thread_entry(ULONG input)
 
     while (1)
     {
-        rtcan_h->rx_ready = true;
+        atomic_store(&rtcan_h->rx_ready, true);
 
         // wait for message
         rtcan_msg_t* msg_ptr;
