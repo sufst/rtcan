@@ -7,12 +7,11 @@
 #ifndef RTCAN_H
 #define RTCAN_H
 
+#include <can.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdbool.h>
-
-#include "tx_api.h"
-#include "rtcan.h"
-#include "can.h"
+#include <tx_api.h>
 
 /*
  * error codes
