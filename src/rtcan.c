@@ -199,7 +199,7 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
     {
         if(rtcan_h->subscriber_map[i] != NULL)
         {
-            /* CAN ID found! */
+            /* Subscriber found! */
             can_id_list[number_ids] = rtcan_h->subscriber_map[i]->can_id;
             number_ids++;
 
@@ -219,7 +219,7 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
         filter.FilterMode = CAN_FILTERMODE_IDLIST;
         filter.FilterScale = CAN_FILTERSCALE_16BIT;    
 
-        /* Configure Filter IDs for each filter */
+        /* Configure Filter IDs for each filter bank */
         for(int i = 0; i < number_banks; i++)
         {
             filter.FilterIdHigh = can_id_list[4 * i] << 5U;
