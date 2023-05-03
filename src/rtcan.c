@@ -179,26 +179,6 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
         ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
     }
 
-    // TODO: configure CAN filters
-    if (no_errors(rtcan_h))
-    {
-        CAN_FilterTypeDef filter;
-        filter.FilterActivation = ENABLE;
-        filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        filter.FilterIdHigh = 0x0000 << 5U;
-        filter.FilterIdLow = 0x0000 << 5U;
-        filter.FilterMaskIdHigh = 0x0000 << 5U;
-        filter.FilterMaskIdLow = 0x0000 << 5U;
-        filter.FilterMode = CAN_FILTERMODE_IDMASK;
-        filter.FilterScale = CAN_FILTERSCALE_16BIT;
-        filter.FilterBank = 0;
-
-        HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-                                                            &filter);
-
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
-    }
-
     return create_status(rtcan_h);
 }
 
@@ -209,6 +189,54 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
  */
 rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
 {
+    /* Since the subscriber ID list is known, we can configure the CAN ID Filter now */
+
+    uint32_t can_id_list[RTCAN_HASHMAP_SIZE] = {0};
+    int number_ids = 0;
+
+    /* Save and count all CAN IDs stored in hashmap */
+    for (uint32_t i = 0; i < RTCAN_HASHMAP_SIZE; i++)
+    {
+        if(rtcan_h->subscriber_map[i] != NULL)
+        {
+            /* CAN ID found! */
+            can_id_list[number_ids] = rtcan_h->subscriber_map[i]->can_id;
+            number_ids++;
+
+        }
+    }
+
+    int number_banks = (number_ids-1)/4 + 1;
+
+    /* Error if there's too many ids to apply filter */
+    ADD_ERROR_IF(number_banks > 28, RTCAN_ERROR_INIT, rtcan_h);
+
+    if (no_errors(rtcan_h))
+    {
+        CAN_FilterTypeDef filter;
+        filter.FilterActivation = ENABLE;
+        filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;  
+        filter.FilterMode = CAN_FILTERMODE_IDLIST;
+        filter.FilterScale = CAN_FILTERSCALE_16BIT;    
+
+        /* Configure Filter IDs for each filter */
+        for(int i = 0; i < number_banks; i++)
+        {
+            filter.FilterIdHigh = can_id_list[4 * i] << 5U;
+            filter.FilterIdLow = can_id_list[4 * i + 1] << 5U;
+            filter.FilterMaskIdHigh = can_id_list[4 * i + 2] << 5U;
+            filter.FilterMaskIdLow = can_id_list[4 * i + 3] << 5U;
+            filter.FilterBank = i;
+
+
+            HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
+                                                                &filter);
+
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+        }
+    }
+
+
     TX_THREAD* threads[2] = {&rtcan_h->tx_thread, &rtcan_h->rx_thread};
 
     for (uint32_t i = 0; i < 2; i++)
