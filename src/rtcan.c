@@ -15,6 +15,8 @@
  * thread constants
  */
 #define RTCAN_THREAD_STACK_SIZE 1024 // TODO: this needs to be profiled
+#define NUM_FILTERS 28
+#define NUM_IDS_PER_FILTER 4
 
 /*
  * useful macros
@@ -191,25 +193,34 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
 {
     /* Since the subscriber ID list is known, we can configure the CAN ID Filter now */
 
-    uint32_t can_id_list[RTCAN_HASHMAP_SIZE] = {0};
+    uint32_t can_id_list[NUM_FILTERS * NUM_IDS_PER_FILTER] = {0};
     int number_ids = 0;
 
     /* Save and count all CAN IDs stored in hashmap */
     for (uint32_t i = 0; i < RTCAN_HASHMAP_SIZE; i++)
     {
-        if(rtcan_h->subscriber_map[i] != NULL)
+        rtcan_hashmap_node_t* node = rtcan_h->subscriber_map[i];
+        if(node != NULL)
         {
             /* Subscriber found! */
-            can_id_list[number_ids] = rtcan_h->subscriber_map[i]->can_id;
+            can_id_list[number_ids] = node->can_id;
             number_ids++;
+            
+            while(node->chained_node_ptr != NULL)
+            {
+                /* Chained node found! */
+                node = node->chained_node_ptr;
+                can_id_list[number_ids] = node->can_id;
+                number_ids++;
+            }
 
         }
     }
 
-    int number_banks = (number_ids-1)/4 + 1;
+    int number_banks = (number_ids-1)/NUM_IDS_PER_FILTER + 1;
 
     /* Error if there's too many ids to apply filter */
-    ADD_ERROR_IF(number_banks > 28, RTCAN_ERROR_INIT, rtcan_h);
+    ADD_ERROR_IF(number_banks > NUM_FILTERS, RTCAN_ERROR_INIT, rtcan_h);
 
     if (no_errors(rtcan_h))
     {
@@ -222,10 +233,10 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
         /* Configure Filter IDs for each filter bank */
         for(int i = 0; i < number_banks; i++)
         {
-            filter.FilterIdHigh = can_id_list[4 * i] << 5U;
-            filter.FilterIdLow = can_id_list[4 * i + 1] << 5U;
-            filter.FilterMaskIdHigh = can_id_list[4 * i + 2] << 5U;
-            filter.FilterMaskIdLow = can_id_list[4 * i + 3] << 5U;
+            filter.FilterIdHigh = can_id_list[NUM_IDS_PER_FILTER * i] << 5U;
+            filter.FilterIdLow = can_id_list[NUM_IDS_PER_FILTER * i + 1] << 5U;
+            filter.FilterMaskIdHigh = can_id_list[NUM_IDS_PER_FILTER * i + 2] << 5U;
+            filter.FilterMaskIdLow = can_id_list[NUM_IDS_PER_FILTER * i + 3] << 5U;
             filter.FilterBank = i;
 
 
