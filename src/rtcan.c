@@ -226,7 +226,6 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
     {
         CAN_FilterTypeDef filter;
         filter.FilterActivation = ENABLE;
-        filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;  
         filter.FilterMode = CAN_FILTERMODE_IDLIST;
         filter.FilterScale = CAN_FILTERSCALE_16BIT;    
 
@@ -238,7 +237,16 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
             filter.FilterMaskIdHigh = can_id_list[NUM_IDS_PER_FILTER * i + 2] << 5U;
             filter.FilterMaskIdLow = can_id_list[NUM_IDS_PER_FILTER * i + 3] << 5U;
             filter.FilterBank = i;
-
+            
+            /* Alternate between FIFO0 and FIFO1 to share the load evenly */
+            if(i % 2)
+            {
+                filter.FilterFIFOAssignment = CAN_FILTER_FIFO1;  
+            }
+            else 
+            {
+                filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;  
+            }
 
             HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
                                                                 &filter);
