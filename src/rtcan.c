@@ -205,6 +205,10 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
             /* Subscriber found! */
             can_id_list[number_ids] = node->can_id;
             number_ids++;
+            if(number_ids > (NUM_FILTERS * NUM_IDS_PER_FILTER))
+            {
+                break;
+            }
             
             while(node->chained_node_ptr != NULL)
             {
@@ -212,6 +216,10 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
                 node = node->chained_node_ptr;
                 can_id_list[number_ids] = node->can_id;
                 number_ids++;
+                if(number_ids > (NUM_FILTERS * NUM_IDS_PER_FILTER))
+                {
+                    break;
+                }
             }
 
         }
@@ -237,7 +245,7 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
             filter.FilterMaskIdHigh = can_id_list[NUM_IDS_PER_FILTER * i + 2] << 5U;
             filter.FilterMaskIdLow = can_id_list[NUM_IDS_PER_FILTER * i + 3] << 5U;
             filter.FilterBank = i;
-            
+
             /* Alternate between FIFO0 and FIFO1 to share the load evenly */
             if(i % 2)
             {
