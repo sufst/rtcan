@@ -15,6 +15,8 @@
  * thread constants
  */
 #define RTCAN_THREAD_STACK_SIZE 1024 // TODO: this needs to be profiled
+#define NUM_FILTERS 28
+#define NUM_IDS_PER_FILTER 4
 
 /*
  * useful macros
@@ -57,6 +59,12 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
     rtcan_h->hcan = hcan;
     rtcan_h->err = RTCAN_ERROR_NONE;
     atomic_store(&rtcan_h->rx_ready, true);
+
+    rtcan_h->subscriber_number = 0;
+    for(int i = 0; i <4 ; i++)
+    {
+        rtcan_h->can_ids[i] = 0;
+    }
 
     // threads
     void* stack_ptr = NULL;
@@ -179,26 +187,6 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
         ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
     }
 
-    // TODO: configure CAN filters
-    if (no_errors(rtcan_h))
-    {
-        CAN_FilterTypeDef filter;
-        filter.FilterActivation = ENABLE;
-        filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        filter.FilterIdHigh = 0x0000 << 5U;
-        filter.FilterIdLow = 0x0000 << 5U;
-        filter.FilterMaskIdHigh = 0x0000 << 5U;
-        filter.FilterMaskIdLow = 0x0000 << 5U;
-        filter.FilterMode = CAN_FILTERMODE_IDMASK;
-        filter.FilterScale = CAN_FILTERSCALE_16BIT;
-        filter.FilterBank = 0;
-
-        HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-                                                            &filter);
-
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
-    }
-
     return create_status(rtcan_h);
 }
 
@@ -209,6 +197,7 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
  */
 rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
 {
+
     TX_THREAD* threads[2] = {&rtcan_h->tx_thread, &rtcan_h->rx_thread};
 
     for (uint32_t i = 0; i < 2; i++)
@@ -564,6 +553,51 @@ rtcan_status_t rtcan_subscribe(rtcan_handle_t* rtcan_h,
             subscriber_ptr->next_subscriber_ptr = create_subscriber(rtcan_h, 
                                                                     queue_ptr);
         }
+    }
+
+    /* Add subscriber's CAN ID to CAN filter ID List */
+    
+    int bank_number = rtcan_h->subscriber_number / NUM_IDS_PER_FILTER + 1; // Calculate the current filter bank number
+
+    /* We need to store 4 consecutive can_ids to setup filter bank. 
+    Otherwise, it overwrites the previous filter configuration deleting previous can_ids */
+
+    int k = rtcan_h->subscriber_number % NUM_IDS_PER_FILTER ; //Calculate index of element in can_ids table
+    rtcan_h->can_ids[k] = can_id;
+
+    rtcan_h->subscriber_number++; // Increment subscriber counter
+    ADD_ERROR_IF(bank_number > NUM_FILTERS, RTCAN_ERROR_INIT, rtcan_h);
+
+    if (no_errors(rtcan_h))
+    {
+        CAN_FilterTypeDef filter;
+        filter.FilterActivation = ENABLE;
+        filter.FilterMode = CAN_FILTERMODE_IDLIST;
+        filter.FilterScale = CAN_FILTERSCALE_16BIT;    
+
+        /* Configure Filter IDs for each filter bank */
+
+        filter.FilterIdHigh = rtcan_h->can_ids[0] << 5U;
+        filter.FilterIdLow = rtcan_h->can_ids[1] << 5U;
+        filter.FilterMaskIdHigh = rtcan_h->can_ids[2] << 5U;
+        filter.FilterMaskIdLow = rtcan_h->can_ids[3] << 5U;
+        filter.FilterBank = bank_number;
+
+        /* Alternate between FIFO0 and FIFO1 to share the load evenly */
+        if(bank_number % 2)
+        {
+            filter.FilterFIFOAssignment = CAN_FILTER_FIFO1;  
+        }
+        else 
+        {
+            filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;  
+        }
+
+        HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
+                                                            &filter);
+
+        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+
     }
 
     return create_status(rtcan_h);
