@@ -215,6 +215,16 @@ typedef struct
      */
     atomic_bool rx_ready;
 
+    /**
+     * @brief  Current subscriber number
+     */
+    uint32_t subscriber_number;
+
+    /**
+     * @brief  Variable that holds 4 consecutive can_ids for filter bank configuration
+     */
+    uint32_t can_ids[4];
+
 } rtcan_handle_t;
 
 /*
