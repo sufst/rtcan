@@ -221,7 +221,7 @@ typedef struct
     uint32_t subscriber_number;
 
     /**
-     * @brief  Variable that holds 4 consecutive can_ids for filter bank configuration
+     * @brief  Table that holds 4 consecutive can_ids for filter bank configuration
      */
     uint32_t can_ids[4];
 

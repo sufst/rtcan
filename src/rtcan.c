@@ -577,10 +577,10 @@ rtcan_status_t rtcan_subscribe(rtcan_handle_t* rtcan_h,
 
         /* Configure Filter IDs for each filter bank */
 
-        filter.FilterIdHigh = can_ids[0] << 5U;
-        filter.FilterIdLow = can_ids[1] << 5U;
-        filter.FilterMaskIdHigh = can_ids[2] << 5U;
-        filter.FilterMaskIdLow = can_ids[3] << 5U;
+        filter.FilterIdHigh = rtcan_h->can_ids[0] << 5U;
+        filter.FilterIdLow = rtcan_h->can_ids[1] << 5U;
+        filter.FilterMaskIdHigh = rtcan_h->can_ids[2] << 5U;
+        filter.FilterMaskIdLow = rtcan_h->can_ids[3] << 5U;
         filter.FilterBank = bank_number;
 
         /* Alternate between FIFO0 and FIFO1 to share the load evenly */
