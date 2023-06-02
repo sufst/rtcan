@@ -19,7 +19,8 @@
 /*
  * useful macros
  */
-#define ADD_ERROR_IF(cond, error, inst) if(cond) { inst->err |= error; }
+// #define ADD_ERROR_IF(cond, error, inst) if(cond) { inst->err |= error; }
+#define ADD_ERROR_IF(cond, error, inst) ;
 
 /*
  * internal functions
@@ -185,11 +186,11 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
         CAN_FilterTypeDef filter;
         filter.FilterActivation = ENABLE;
         filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        filter.FilterIdHigh = 0x0000 << 5U;
+        filter.FilterIdHigh = 0x00AA << 5U; // pm100 internal states
         filter.FilterIdLow = 0x0000 << 5U;
         filter.FilterMaskIdHigh = 0x0000 << 5U;
         filter.FilterMaskIdLow = 0x0000 << 5U;
-        filter.FilterMode = CAN_FILTERMODE_IDMASK;
+        filter.FilterMode = CAN_FILTERMODE_IDLIST;
         filter.FilterScale = CAN_FILTERSCALE_16BIT;
         filter.FilterBank = 0;
 
@@ -201,6 +202,14 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
 
     return create_status(rtcan_h);
 }
+
+// #define IS_CAN_IT(IT) ((IT) <= (CAN_IT_TX_MAILBOX_EMPTY     | CAN_IT_RX_FIFO0_MSG_PENDING      | \
+//                                 CAN_IT_RX_FIFO0_FULL        | CAN_IT_RX_FIFO0_OVERRUN          | \
+//                                 CAN_IT_RX_FIFO1_MSG_PENDING | CAN_IT_RX_FIFO1_FULL             | \
+//                                 CAN_IT_RX_FIFO1_OVERRUN     | CAN_IT_WAKEUP                    | \
+//                                 CAN_IT_SLEEP_ACK            | CAN_IT_ERROR_WARNING             | \
+//                                 CAN_IT_ERROR_PASSIVE        | CAN_IT_BUSOFF                    | \
+//                                 CAN_IT_LAST_ERROR_CODE      | CAN_IT_ERROR))
 
 /**
  * @brief   Starts the RTCAN service
@@ -222,7 +231,11 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
     {
         const uint32_t notifs = CAN_IT_TX_MAILBOX_EMPTY
                                 | CAN_IT_RX_FIFO0_MSG_PENDING
-                                | CAN_IT_RX_FIFO1_MSG_PENDING;
+                                | CAN_IT_RX_FIFO1_MSG_PENDING
+                                | CAN_IT_ERROR
+                                | CAN_IT_BUSOFF
+                                | CAN_IT_ERROR_PASSIVE
+                                | CAN_IT_ERROR_WARNING;
 
         HAL_StatusTypeDef hal_status
             = HAL_CAN_ActivateNotification(rtcan_h->hcan,
@@ -234,6 +247,9 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
     if (no_errors(rtcan_h))
     {
         HAL_StatusTypeDef hal_status = HAL_CAN_Start(rtcan_h->hcan);
+        
+        while(HAL_CAN_GetState(rtcan_h->hcan) != HAL_CAN_STATE_LISTENING)
+            ;
 
         ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
     }
@@ -311,7 +327,7 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
         rtcan_h->err |= RTCAN_ERROR_INTERNAL;
     }
 
-    if (no_errors(rtcan_h))
+    // if (no_errors(rtcan_h))
     {
         // create message
         CAN_TxHeaderTypeDef header = {
@@ -328,6 +344,7 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
                                                             &header,
                                                             data_ptr,
                                                             &tx_mailbox);
+
 
         if (hal_status != HAL_OK)
         {
@@ -728,6 +745,13 @@ static void rtcan_rx_thread_entry(ULONG input)
 /**
  * @brief       Handles HAL CAN errors
  * 
+ * @note        `HAL_CAN_ERROR_BD` and `HAL_CAN_ERROR_CRC` are much more likely
+ *              to happen in the actual car where the noise level is higher.
+ *  
+ *              Note also that it is possible for multiple errors to happen at
+ *              once so the error code will be equal to a bitwise combination 
+ *              of the HAL error codes.
+ * 
  * @param[in]   rtcan_h     RTCAN handle
  * @param[in]   can_h       CAN handle
  */
@@ -745,23 +769,40 @@ rtcan_status_t rtcan_handle_hal_error(rtcan_handle_t* rtcan_h,
             HAL_CAN_ERROR_TX_ALST0,
             HAL_CAN_ERROR_TX_ALST1,
             HAL_CAN_ERROR_TX_ALST2,
+            HAL_CAN_ERROR_BD,
+            HAL_CAN_ERROR_CRC,
+            HAL_CAN_ERROR_ACK
         };
 
+// #if (1)
+
+        tx_semaphore_put(&rtcan_h->tx_mailbox_sem);
+        HAL_CAN_ResetError(rtcan_h->hcan);
+#ifdef AHDFKJSD
         uint32_t error = HAL_CAN_GetError(rtcan_h->hcan);
         bool error_handled = false;
 
         for (uint32_t i = 0; i < sizeof(tx_errors)/sizeof(tx_errors[0]); i++)
         {
-            if (error == tx_errors[i])
+            if (error & tx_errors[i]) // check the single bit
             {
                 tx_semaphore_put(&rtcan_h->tx_mailbox_sem);
+                HAL_CAN_ResetError(rtcan_h->hcan);
                 error_handled = true;
                 break;
             }
         }
 
-        // unhandled/unknown errors
-        ADD_ERROR_IF(!error_handled, RTCAN_ERROR_INTERNAL, rtcan_h);
+        // (void) error_handled;
+        // if (!error_handled)
+        // {
+        //     tx_semaphore_put(&rtcan_h->tx_mailbox_sem);
+        //     HAL_CAN_ResetError(rtcan_h->hcan);
+        // }
+
+        // // unhandled/unknown errors
+        // ADD_ERROR_IF(!error_handled, RTCAN_ERROR_INTERNAL, rtcan_h);
+#endif
     }
 
     return status;
