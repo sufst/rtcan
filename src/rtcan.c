@@ -385,7 +385,7 @@ static void rtcan_tx_thread_entry(ULONG input)
             (void) transmit_internal(rtcan_h,
                                      message.identifier,
                                      message.data,
-                                     message.length
+                                     message.length,
                                      message.extended);
         }
         else
