@@ -34,7 +34,8 @@ static void rtcan_rx_thread_entry(ULONG input);
 static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
                                         uint32_t identifier,
                                         const uint8_t* data_ptr,
-                                        uint32_t data_length);
+                                        uint32_t data_length,
+                                        bool extended);
 
 
 //=============================================================== initialisation
