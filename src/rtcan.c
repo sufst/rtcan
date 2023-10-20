@@ -338,7 +338,7 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
             .DLC = data_length
         };
 
-        if(!extended){
+        if(extended){
             header.IDE = CAN_ID_EXT;
             header.ExtId = identifier;
         } else {
