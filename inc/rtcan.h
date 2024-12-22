@@ -59,6 +59,16 @@ typedef struct _rtcan_subscriber_t {
      */
     struct _rtcan_subscriber_t* next_subscriber_ptr;
 
+    /**
+     * @brief   Subscription period (optional)
+     */
+    uint32_t subscription_period;
+
+    /**
+     * @brief   Timestamp of the last delivered message.
+     */
+    uint32_t last_timestamp;
+    
 } rtcan_subscriber_t;
 
 /**
@@ -243,7 +253,8 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
 
 rtcan_status_t rtcan_subscribe(rtcan_handle_t* rtcan_h,
                                uint32_t can_id, 
-                               TX_QUEUE* queue_ptr);
+                               TX_QUEUE* queue_ptr,
+                               uint32_t period);
 
 rtcan_status_t rtcan_msg_consumed(rtcan_handle_t* rtcan_h,
                                   rtcan_msg_t* msg_ptr);
