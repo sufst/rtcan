@@ -62,7 +62,7 @@ typedef struct _rtcan_subscriber_t {
 } rtcan_subscriber_t;
 
 /**
- * @brief   subscriber node for hashmap of subscribers
+ * @brief   Subscriber node for hashmap of subscribers. Represents an entry in a hashmap
  */
 typedef struct _rtcan_hashmap_node_t {
 
@@ -247,5 +247,8 @@ rtcan_status_t rtcan_handle_hal_error(rtcan_handle_t* rtcan_h,
                                       CAN_HandleTypeDef* can_h);
 
 uint32_t rtcan_get_error(rtcan_handle_t* rtcan_h);
+
+rtcan_hashmap_node_t* find_hashmap_node(rtcan_handle_t* rtcan_h,
+                                               const uint32_t can_id);
 
 #endif
