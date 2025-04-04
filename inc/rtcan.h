@@ -112,6 +112,11 @@ typedef struct
      */
     volatile uint32_t reference_count;
 
+    /**
+     * @brief   Flag showing whether the message is an extended message
+     */
+     bool extended;
+
 } rtcan_msg_t;
 
 /*

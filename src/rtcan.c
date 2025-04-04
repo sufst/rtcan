@@ -34,7 +34,8 @@ static void rtcan_rx_thread_entry(ULONG input);
 static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
                                         uint32_t identifier,
                                         const uint8_t* data_ptr,
-                                        uint32_t data_length);
+                                        uint32_t data_length,
+                                        bool extended);
 
 
 //=============================================================== initialisation
@@ -393,11 +394,13 @@ rtcan_status_t rtcan_handle_tx_mailbox_callback(rtcan_handle_t* rtcan_h,
  * @param[in]   identifier      CAN standard identifier
  * @param[in]   data_ptr        Pointer to data to transmit
  * @param[in]   data_length     Length of data to transmit
+ * @param[in]   extended        Flag as to whether this is an extended frame to send
  */
 static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
                                         uint32_t identifier,
                                         const uint8_t* data_ptr,
-                                        uint32_t data_length)
+                                        uint32_t data_length,
+                                        const bool extended)
 {
     if ((data_ptr == NULL) || (data_length == 0U))
     {
@@ -414,11 +417,17 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
     {
         // create message
         CAN_TxHeaderTypeDef header = {
-            .IDE = CAN_ID_STD,
             .RTR = CAN_RTR_DATA,
-            .DLC = data_length,
-            .StdId = identifier,
+            .DLC = data_length
         };
+
+        if(extended){
+            header.IDE = CAN_ID_EXT;
+            header.ExtId = identifier;
+        } else {
+            header.IDE = CAN_ID_STD;
+            header.StdId = identifier;
+        }
 
         // send it
         uint32_t tx_mailbox;
@@ -459,7 +468,8 @@ static void rtcan_tx_thread_entry(ULONG input)
             (void) transmit_internal(rtcan_h,
                                      message.identifier,
                                      message.data,
-                                     message.length);
+                                     message.length,
+                                     message.extended);
         }
         else
         {
