@@ -570,7 +570,7 @@ static rtcan_subscriber_t* create_subscriber(rtcan_handle_t* rtcan_h,
  * @param[in]   rtcan_h     RTCAN handle
  * @param[in]   can_id      CAN ID
  */
-rtcan_hashmap_node_t* find_hashmap_node(rtcan_handle_t* rtcan_h,
+static rtcan_hashmap_node_t* find_hashmap_node(rtcan_handle_t* rtcan_h,
                                                const uint32_t can_id)
 {
     const uint32_t index = hashmap_index(can_id);
