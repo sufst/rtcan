@@ -121,6 +121,11 @@ typedef struct
 
 } rtcan_msg_t;
 
+/**
+ * @brief   Callback type for received CAN messages
+ */
+typedef void (*rtcan_rx_callback_t)(const rtcan_msg_t*);
+
 /*
  * queue sizing constants
  */
@@ -221,6 +226,11 @@ typedef struct
      * @brief   Flag for Rx service being ready
      */
     atomic_bool rx_ready;
+
+    /**
+     * @brief   Optional callback invoked for each received CAN message (ISR context)
+     */
+    rtcan_rx_callback_t rx_callback;
 
 } rtcan_handle_t;
 

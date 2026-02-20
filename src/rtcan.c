@@ -19,8 +19,7 @@
 /*
  * useful macros
  */
-// #define ADD_ERROR_IF(cond, error, inst) if(cond) { inst->err |= error; }
-#define ADD_ERROR_IF(cond, error, inst) ;
+#define ADD_ERROR_IF(cond, error, inst) if(cond) { inst->err |= error; }
 
 /*
  * internal functions
@@ -57,6 +56,7 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
                           TX_BYTE_POOL* stack_pool_ptr)
 {
     rtcan_h->hcan = hcan;
+    rtcan_h->rx_callback = NULL;
     rtcan_h->err = RTCAN_ERROR_NONE;
     atomic_store(&rtcan_h->rx_ready, true);
 
@@ -181,107 +181,116 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
         ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
     }
 
-    // TODO: configure CAN filters
+    // configure CAN filters (per-bus, 32-bit mask mode)
     if (no_errors(rtcan_h))
     {
-        // CAN_FilterTypeDef filter;
-        // filter.FilterActivation = ENABLE;
-        // filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        // filter.FilterIdHigh = 0x00AA << 5U; // pm100 internal states
-        // filter.FilterIdLow = 0x0000 << 5U;
-        // filter.FilterMaskIdHigh = 0x0000 << 5U;
-        // filter.FilterMaskIdLow = 0x0000 << 5U;
-        // filter.FilterMode = CAN_FILTERMODE_IDLIST;
-        // filter.FilterScale = CAN_FILTERSCALE_16BIT;
-        // filter.FilterBank = 0;
+        HAL_StatusTypeDef hal_status;
+        CAN_FilterTypeDef f = {0};
+        f.FilterActivation = ENABLE;
+        f.FilterMode = CAN_FILTERMODE_IDMASK;
+        f.FilterScale = CAN_FILTERSCALE_32BIT;
+        f.SlaveStartFilterBank = 14;
 
-        // HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-        //                                                     &filter);
+        if (rtcan_h->hcan->Instance == CAN1)
+        {
+            // CAN C (critical bus): banks 0-4
 
-        CAN_FilterTypeDef filter;
-        filter.FilterActivation = ENABLE;
-        filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        filter.FilterIdHigh = 0xAA << 5U; // pm100 internal states
-        filter.FilterIdLow = 0x106 << 5U;   // vcu simulated messages
-        filter.FilterMaskIdHigh = 0x0000 << 5U;
-        filter.FilterMaskIdLow = 0x0000 << 5U;
-        filter.FilterMode = CAN_FILTERMODE_IDLIST;
-        filter.FilterScale = CAN_FILTERSCALE_16BIT;
-        filter.FilterBank = 0;
+            // Bank 0: 0xA0-0xAF (PM100 broadcasts, temps)
+            f.FilterBank = 0;
+            f.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+            f.FilterIdHigh = 0xA0 << 5U;
+            f.FilterIdLow = 0;
+            f.FilterMaskIdHigh = 0x7F0 << 5U;
+            f.FilterMaskIdLow = 0;
+            hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, &f);
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
 
-        CAN_FilterTypeDef filter2;
-        filter2.FilterActivation = ENABLE;
-        filter2.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        filter2.FilterIdHigh = 0xA0 << 5U; // Temperature Set 1
-        filter2.FilterIdLow = 0xA1 << 5U;  // Temperature Set 2
-        filter2.FilterMaskIdHigh = 0x0000 << 5U;
-        filter2.FilterMaskIdLow = 0x0000 << 5U;
-        filter2.FilterMode = CAN_FILTERMODE_IDLIST;
-        filter2.FilterScale = CAN_FILTERSCALE_16BIT;
-        filter2.FilterBank = 1;
+            // Bank 1: 0xB0
+            f.FilterBank = 1;
+            f.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+            f.FilterIdHigh = 0xB0 << 5U;
+            f.FilterMaskIdHigh = 0x7FF << 5U;
+            hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, &f);
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
 
-        CAN_FilterTypeDef filter3;
-        filter3.FilterActivation = ENABLE;
-        filter3.FilterFIFOAssignment = CAN_FILTER_FIFO1;
-        filter3.FilterIdHigh = 0xAB << 5U; // pm100 fault codes
-        filter3.FilterIdLow = 0xA2 << 5U; // Temperature Set 3
-        filter3.FilterMaskIdHigh = 0x0000 << 5U;
-        filter3.FilterMaskIdLow = 0x0000 << 5U;
-        filter3.FilterMode = CAN_FILTERMODE_IDLIST;
-        filter3.FilterScale = CAN_FILTERSCALE_16BIT;
-        filter3.FilterBank = 2;
+            // Bank 2: 0xC0-0xC2 (also accepts 0xC3)
+            f.FilterBank = 2;
+            f.FilterFIFOAssignment = CAN_FILTER_FIFO1;
+            f.FilterIdHigh = 0xC0 << 5U;
+            f.FilterMaskIdHigh = 0x7FC << 5U;
+            hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, &f);
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
 
-        CAN_FilterTypeDef filter4;
-        filter4.FilterActivation = ENABLE;
-        filter4.FilterFIFOAssignment = CAN_FILTER_FIFO1;
-        filter4.FilterIdHigh = 0x503 << 5U; // pdm out voltage
-        filter4.FilterIdLow = 0xA5 << 5U; // pm100 info
-        filter4.FilterMaskIdHigh = 0x0000 << 5U;
-        filter4.FilterMaskIdLow = 0x0000 << 5U;
-        filter4.FilterMode = CAN_FILTERMODE_IDLIST;
-        filter4.FilterScale = CAN_FILTERSCALE_16BIT;
-        filter4.FilterBank = 3;
+            // Bank 3: 0x1D5, 0x1D7 (bit 1 don't care)
+            f.FilterBank = 3;
+            f.FilterFIFOAssignment = CAN_FILTER_FIFO1;
+            f.FilterIdHigh = 0x1D5 << 5U;
+            f.FilterMaskIdHigh = 0x7FD << 5U;
+            hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, &f);
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
 
-        HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-            &filter);
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
-        hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-            &filter2);
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
-        hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-            &filter3);
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
-        hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-            &filter4);
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+            // Bank 4: 0x202
+            f.FilterBank = 4;
+            f.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+            f.FilterIdHigh = 0x202 << 5U;
+            f.FilterMaskIdHigh = 0x7FF << 5U;
+            hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, &f);
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+        }
+        else if (rtcan_h->hcan->Instance == CAN2)
+        {
+            // CAN S (sensors bus): banks 14-19
 
-        // CAN_FilterTypeDef filter;
-        // filter.FilterActivation = ENABLE;
-        // filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        // filter.FilterIdHigh = 0xAA << 5U; // pm100 internal states
-        // filter.FilterIdLow = 0x106 << 5U;   // vcu simulated messages
-        // filter.FilterMaskIdHigh = 0xAB << 5U;  //pm100 fault codes
-        // filter.FilterMaskIdLow = 0xA2 << 5U;   // Temperature Set 3
-        // filter.FilterMode = CAN_FILTERMODE_IDLIST;
-        // filter.FilterScale = CAN_FILTERSCALE_16BIT;
-        // filter.FilterBank = 0;
+            // Bank 14: 0x0
+            f.FilterBank = 14;
+            f.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+            f.FilterIdHigh = 0x0 << 5U;
+            f.FilterIdLow = 0;
+            f.FilterMaskIdHigh = 0x7FF << 5U;
+            f.FilterMaskIdLow = 0;
+            hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, &f);
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
 
-        // CAN_FilterTypeDef filter2;
-        // filter2.FilterActivation = ENABLE;
-        // filter2.FilterFIFOAssignment = CAN_FILTER_FIFO1;
-        // filter2.FilterIdHigh = 0xA0 << 5U; // Temperature Set 1
-        // filter2.FilterIdLow = 0xA1 << 5U;  // Temperature Set 2
-        // filter2.FilterMaskIdHigh = 0x0000 << 5U;
-        // filter2.FilterMaskIdLow = 0x0000 << 5U;
-        // filter2.FilterMode = CAN_FILTERMODE_IDLIST;
-        // filter2.FilterScale = CAN_FILTERSCALE_16BIT;
-        // filter2.FilterBank = 1;
+            // Bank 15: 0x40-0x42 (also accepts 0x43)
+            f.FilterBank = 15;
+            f.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+            f.FilterIdHigh = 0x40 << 5U;
+            f.FilterMaskIdHigh = 0x7FC << 5U;
+            hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, &f);
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
 
-        // HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-        //     &filter);
-        // ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
-        // hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-        //     &filter2);
+            // Bank 16: 0x100-0x107 (covers 0x100-0x102, 0x104-0x105)
+            f.FilterBank = 16;
+            f.FilterFIFOAssignment = CAN_FILTER_FIFO1;
+            f.FilterIdHigh = 0x100 << 5U;
+            f.FilterMaskIdHigh = 0x7F8 << 5U;
+            hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, &f);
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+
+            // Bank 17: 0x200-0x203
+            f.FilterBank = 17;
+            f.FilterFIFOAssignment = CAN_FILTER_FIFO1;
+            f.FilterIdHigh = 0x200 << 5U;
+            f.FilterMaskIdHigh = 0x7FC << 5U;
+            hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, &f);
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+
+            // Bank 18: 0x500-0x507 (covers 0x500-0x505)
+            f.FilterBank = 18;
+            f.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+            f.FilterIdHigh = 0x500 << 5U;
+            f.FilterMaskIdHigh = 0x7F8 << 5U;
+            hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, &f);
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+
+            // Bank 19: 0x600-0x607 (covers 0x600-0x604)
+            f.FilterBank = 19;
+            f.FilterFIFOAssignment = CAN_FILTER_FIFO1;
+            f.FilterIdHigh = 0x600 << 5U;
+            f.FilterMaskIdHigh = 0x7F8 << 5U;
+            hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, &f);
+            ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+        }
     }
 
     return create_status(rtcan_h);
@@ -725,8 +734,13 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
             msg_ptr->identifier = header.StdId;
             msg_ptr->length = header.DLC;
             msg_ptr->reference_count = 0;
+
+            if (rtcan_h->rx_callback)
+            {
+                rtcan_h->rx_callback(msg_ptr);
+            }
         }
-        else 
+        else
         {
             tx_block_release(msg_ptr);
         }
