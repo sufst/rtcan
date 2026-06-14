@@ -1,277 +1,258 @@
 # RTCAN
 
-> :warning: This system is in early development. It is functional at a basic level, but expect bugs!
+RTCAN (Real-Time CAN) is a portable, memory-safe C11 driver library for managing concurrent access to CAN peripherals on STM32 microcontrollers using a publisher/subscriber model. 
 
-## About
+Designed for safety-critical Formula Student systems, the library is **RTOS-agnostic** and adheres to safety guidelines (such as MISRA C:2012) by utilizing **100% static allocation** with zero dynamic memory overhead.
 
-RTCAN (Real-Time CAN) is a [ThreadX RTOS](https://learn.microsoft.com/en-us/azure/rtos/threadx/overview-threadx) 
-service for managing concurrent access to CAN peripherals on [STM32 microcontrollers](https://www.st.com/en/microcontrollers-microprocessors/stm32-32-bit-arm-cortex-mcus.html).
+---
 
-Features:
-- Background thread based ThreadX service.
-- FIFO transmit queuing.
-- "Subscription" style receiving functionality.
+## Key Features
 
-Planned features:
-- Automatic CAN filter configuration management.
-- Priority queueing for transmissions.
+- **Operating System Abstraction Layer (OSAL):** Decoupled from any specific RTOS. Native wrappers are provided for:
+  - **CMSIS-RTOS v2** (e.g., FreeRTOS, RTX5, Zephyr) in `src/rtcan_osal_cmsis2.c`.
+  - **ThreadX** in `src/rtcan_osal_threadx.c` (retaining backward-compatibility with a 100% static control block pool).
+- **100% Static Allocation (MISRA C:2012 compliant):** All queues, message pools, and subscriber nodes are allocated statically at compile-time. There is no heap fragmentation or Out-of-Memory risk.
+- **Deterministic O(1) Lookup Table (LUT):** Replaced separate-chained collision hashmaps with a direct Lookup Table (2048 entries) for standard 11-bit CAN IDs, ensuring constant-time dispatch on the receive path.
+- **Race-Free Concurrent Dispatch:** Multi-threaded publisher/subscriber model using thread-safe C11 atomics (`stdatomic.h`) to handle message reference counting safely across queues.
+- **Unsubscribe API:** Allows threads to dynamically unsubscribe from message queues, safely recycling subscriber slots back into the static pool.
+- **Decoupled Application Logic:** Filter configurations are passed dynamically to `rtcan_init()` instead of being hardcoded in the driver.
 
-Not currently supported:
-- STM32 FDCAN HAL.
-- Extended CAN identifiers.
+---
 
 ## Dependencies
 
-- C11 compiler.
-- 32 bit STM32 microcontroller.
-- ThreadX memory pool, thread, semaphore and queue services.
-- STM32 Hardware Abstraction Layer (HAL) CAN drivers.
+- **C11 compiler** (uses `<stdatomic.h>`).
+- **32-bit STM32 Microcontroller** (uses STM32 HAL CAN drivers).
+- **An RTOS** supported by the OSAL backends (CMSIS-RTOS v2 or ThreadX).
+
+---
 
 ## Adding to a Project
 
-### Submodule
+### Option A: Using CMake `FetchContent` (Recommended)
 
-Add this repository as a submodule using:
+To avoid managing Git submodules, add this to your main project's `CMakeLists.txt`:
 
-```sh
-git submodule add https://github.com/sufst/rtcan
+```cmake
+include(FetchContent)
+
+# Declare RTCAN
+FetchContent_Declare(
+    rtcan
+    GIT_REPOSITORY https://github.com/sufst/rtcan.git
+    GIT_TAG        main # Or use a specific tag/commit hash
+)
+FetchContent_MakeAvailable(rtcan)
+
+# Link it to your executable
+target_link_libraries(your_firmware_target PRIVATE rtcan)
 ```
 
-Make sure to change directories to the location you want the submodule to exist
-in the project source tree. Note that the use of submodules will require the 
-following commands to be run when cloning a project for the first time:
+### Option B: Using Git Submodules
+If you prefer submodules:
+1. Clone the submodule into your project directory:
+   ```sh
+   git submodule add https://github.com/sufst/rtcan.git third_party/rtcan
+   ```
+2. Include the header directory `inc/` in your include paths.
+3. Add `src/rtcan.c` to your build sources.
+4. Add the appropriate OSAL wrapper to your build sources:
+   - For CMSIS-RTOS v2: `src/rtcan_osal_cmsis2.c`
+   - For ThreadX: `src/rtcan_osal_threadx.c`
 
-```sh
-git submodule init
-git submodule update
-```
+---
 
-For more information on submodules, see the [Git submodule documentation](https://git-scm.com/book/en/v2/Git-Tools-Submodules).
+## API Usage Guide
 
-### Build System
-
-RTCAN consists of one header file (`inc/rtcan.h`) which should be added to the
-include path for a project (or just to specific files requiring RTCAN), 
-and one source file (`src/rtcan.c`) which should be compiled by the build system
-in question. Make sure the [RTCAN dependencies](#dependencies) are satisfied.
-
-## Usage
-
-### Initialisation
-
-RTCAN is provided for a CAN peripheral by an instance of `rtcan_handle_t` which
-is initialised with the function `rtcan_init()`. Each RTCAN instance manages
-one CAN peripheral and has two background service threads: one for transmitting
-and one for receiving.
-
-### Transmitting
-
-The `rtcan_transmit()` function uses a simple FIFO queueing system to transmit
-messages with the CAN peripheral. This provides a way of ensuring that there is 
-not contention for the CAN peripheral by multiple threads. 
-
-To use the transmit service, CAN Tx interrupts must be enabled and the 
-`HAL_CAN_TxMailbox<N>CompleteCallback` must be implemented to call 
-`rtcan_handle_tx_mailbox_callback` (for all `N`). For example, for the
-HAL callback for Tx mailbox 1:
+### 1. Initialization
+Declare your global RTCAN handle and configure stack allocations, priority, and filters:
 
 ```c
-static rtcan_handle_t rtcan;
-
-void HAL_CAN_TxMailbox1CompleteCallback(CAN_HandleTypeDef* can_h)
-{
-    rtcan_handle_tx_mailbox_callback(&rtcan, can_h);
-}
-```
-
-### Receiving and Subscriptions
-
-Receiving functionality in RTCAN is based around a "publisher" / "subscriber"
-model in which application threads can register their interest in receiving
-CAN messages with a particular ID through the `rtcan_subscribe()` function.
-Threads must provide a queue as an endpoint for messages where queue items have
-size `TX_1_ULONG`. Incoming CAN messages are published to the queue by the RTCAN
-service, where each queue item is a pointer to the received message represented 
-as an `rtcan_msg_t` struct. Once a subscriber has finished with a message, it 
-**must** call the `rtcan_msg_consumed()` function to indicate this to the service.
-Internally `rtcan_msg_t` is a reference counted, dynamically allocated data
-structure which is distributed to all the subscribers of a given CAN ID. 
-As such, subscribers must treat this message as **read only** and should
-not modify the `reference_count` field.
-
-To use the receive service, CAN Rx interrupts must be enabled and the 
-`HAL_CAN_RxFifo<N>MsgPendingCallback` must be implemented to call 
-`rtcan_handle_rx_it` (for all `N`). For example, for the
-HAL callback for Rx FIFO 1:
-
-```c
-static rtcan_handle_t rtcan;
-
-void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* can_h)
-{
-    rtcan_handle_rx_it(&rtcan, can_h, 1);
-}
-```
-
-### CAN Errors
-
-If CAN transmit errors occur, RTCAN must be notified through the `rtcan_handle_hal_error()`
-function when `HAL_CAN_ErrorCallback()` is called.
-
-```c
-static rtcan_handle_t rtcan;
-
-void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* can_h)
-{
-    rtcan_handle_hal_error(&rtcan, can_h);
-}
-```
-
-Failure to do so will mean the RTCAN transmit service is no longer able to
-transmit messages. Note that it is not necessary to check that the CAN handle
-matches that of the RTCAN instance, this is done automatically by RTCAN.
-
-### Error Codes
-
-All functions in the RTCAN API return a status code (`rtcan_status_t`) 
-indicating the RTCAN error state. `RTCAN_OK` indicates no error and 
-`RTCAN_ERROR` indicates an error. The specific error can be checked with the
-return value of `rtcan_get_error()`. This design is based around the conventions
-of the STM32 HAL.
-
-### Example
-
-The following example uses RTCAN to subscribe to CAN messages with ID `0x100`
-and re-transmit the data as a CAN message with ID `0x101`.
-
-```c
-#include "tx_api.h"
 #include "rtcan.h"
-#include "can.h"
-#include "string.h" // for memcpy()
-
-#define RTCAN_THREAD_PRIORITY   3
-#define MY_THREAD_PRIORITY      4
-#define MY_THREAD_STACK_SIZE    1024
 
 static rtcan_handle_t rtcan;
-static TX_THREAD my_thread;
-static TX_QUEUE rx_queue;
-static ULONG rx_queue_mem[10];
+static uint64_t rtcan_tx_stack[128]; // 1024 bytes (8-byte aligned)
+static uint64_t rtcan_rx_stack[128]; // 1024 bytes (8-byte aligned)
 
-static void my_thread_entry(ULONG thread_input);
+/* Define hardware filters for the STM32 CAN peripheral */
+static const CAN_FilterTypeDef my_filters[] = {
+    {
+        .FilterActivation = ENABLE,
+        .FilterFIFOAssignment = CAN_FILTER_FIFO0,
+        .FilterIdHigh = (0x100 << 5U),      // Filter for VCU simulated command (0x100)
+        .FilterIdLow = (0x200 << 5U),       // Filter for Inverter telemetry (0x200)
+        .FilterMaskIdHigh = 0x0000,
+        .FilterMaskIdLow = 0x0000,
+        .FilterMode = CAN_FILTERMODE_IDLIST,
+        .FilterScale = CAN_FILTERSCALE_16BIT,
+        .FilterBank = 0
+    }
+};
 
-/**
- * initialise a thread which will use RTCAN services
- */
-void init_my_thread(TX_BYTE_POOL* app_mem_pool)
+void app_can_init(void)
 {
-    // initialise RTCAN instance
-    rtcan_init(&rtcan, 
-               &hcan1, 
-               RTCAN_THREAD_PRIORITY, 
-               app_mem_pool);
+    rtcan_config_t config = {
+        .thread_priority = 3,
+        .tx_thread_stack_size = sizeof(rtcan_tx_stack),
+        .tx_thread_stack_mem = rtcan_tx_stack,
+        .rx_thread_stack_size = sizeof(rtcan_rx_stack),
+        .rx_thread_stack_mem = rtcan_rx_stack,
+        .filters = my_filters,
+        .filter_count = sizeof(my_filters) / sizeof(my_filters[0])
+    };
 
-    // allocate memory for thread
-    void* stack_ptr;
-    tx_byte_allocate(app_mem_pool,
-                     &stack_ptr,
-                     MY_THREAD_STACK_SIZE,
-                     TX_NO_WAIT);
+    /* Initialize the RTCAN driver instance */
+    rtcan_init(&rtcan, &hcan1, &config);
 
-    // create thread
-    tx_thread_create(&my_thread,
-                     my_thread_entry,
-                     NULL,
-                     stack_ptr,
-                     MY_THREAD_STACK_SIZE,
-                     MY_THREAD_PRIORITY,
-                     MY_THREAD_PRIORITY,
-                     TX_NO_TIME_SLICE,
-                     TX_AUTO_START);
-
-    // subscribe to a message
-    tx_queue_create(&rx_queue,
-                    "My Rx Queue",
-                    TX_1_ULONG,
-                    rx_queue_mem,
-                    sizeof(rx_queue));
-
-    rtcan_subscribe(&rtcan, 0x100, &rx_queue);
-
-    // start the RTCAN service
+    /* Start the background threads and activate CAN interrupts */
     rtcan_start(&rtcan);
 }
+```
 
-/**
- * thread which uses RTCAN services
- */
-void my_thread_entry(ULONG thread_input)
+### 2. Subscribing & Unsubscribing
+Declare a queue in your application thread, subscribe to standard IDs, and read from the queue. When finished with a message, release it using `rtcan_msg_consumed`.
+
+```c
+#include "rtcan.h"
+
+static rtcan_queue_t my_rx_queue;
+static uint8_t queue_storage[10U * sizeof(rtcan_msg_t*)];
+
+void app_thread(void* arg)
 {
-    (void) thread_input; // unused
+    /* Create an OSAL queue to receive pointers to rtcan_msg_t structs */
+    rtcan_os_queue_create(&my_rx_queue, "App Queue", sizeof(rtcan_msg_t*), 10U, queue_storage, sizeof(queue_storage));
+
+    /* Subscribe to message ID 0x100 */
+    rtcan_subscribe(&rtcan, 0x100, my_rx_queue);
 
     while (1)
     {
-        // wait for an item to enter the rx queue
-        rtcan_msg_t* msg_ptr;
+        rtcan_msg_t* rx_msg = NULL;
+        /* Block waiting for an incoming message */
+        if (rtcan_os_queue_receive(my_rx_queue, &rx_msg, RTCAN_OS_WAIT_FOREVER) == RTCAN_OS_OK)
+        {
+            /* Process data ... */
+            uint8_t state = rx_msg->data[0];
 
-        tx_queue_receive(&rx_queue, 
-                         (void*) &msg_ptr, 
-                         TX_WAIT_FOREVER);
-
-        // make a copy of the message but change the ID to 0x101
-        rtcan_msg_t new_message;
-        new_message.identifier = 0x101;
-        new_message.length = message_ptr->length;
-        memcpy((void*) new_message.data, (void*) message_ptr->data, msg_ptr->length);
-
-        // transmit the copied message
-        rtcan_transmit(&rtcan, &new_message);
-
-        // mark the original received message as consumed
-        rtcan_msg_consumed(&rtcan, msg_ptr);
+            /* Free the message reference back to the static pool */
+            rtcan_msg_consumed(&rtcan, rx_msg);
+        }
     }
-}
 
-/**
- * implement HAL CAN callbacks to call RTCAN handler functions
- * 
- * note: specific callbacks depend on CAN capabilities of target STM32
- */
-void HAL_CAN_TxMailbox0CompleteCallback(CAN_HandleTypeDef* can_h)
-{
-    rtcan_handle_tx_mailbox_callback(&rtcan, can_h);
+    /* Unsubscribe if the thread exits or changes roles */
+    rtcan_unsubscribe(&rtcan, 0x100, my_rx_queue);
 }
-
-void HAL_CAN_TxMailbox1CompleteCallback(CAN_HandleTypeDef* can_h)
-{
-    rtcan_handle_tx_mailbox_callback(&rtcan, can_h);
-}
-
-void HAL_CAN_TxMailbox2CompleteCallback(CAN_HandleTypeDef* can_h)
-{
-    rtcan_handle_tx_mailbox_callback(&rtcan, can_h);
-}
-
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* can_h)
-{
-    rtcan_handle_rx_it(&rtcan, can_h, 0);
-}
-
-void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* can_h)
-{
-    rtcan_handle_rx_it(&rtcan, can_h, 1);
-}
-
 ```
 
-> Checking of return codes has been omitted here for brevity. In practice,
-  you should always check the return codes of both ThreadX and RTCAN 
-  functions.
+### 3. Transmitting
+Populate an `rtcan_msg_t` block and pass it to `rtcan_transmit()` to queue it in the background Tx loop:
 
-## Other Platforms
+```c
+void send_status(void)
+{
+    rtcan_msg_t tx_msg = {
+        .identifier = 0x201,
+        .extended = false,
+        .length = 4,
+        .data = {0xAA, 0xBB, 0xCC, 0xDD}
+    };
 
-This implementation was developed for the STM32 platform, however it should be
-relatively simple to port to another platform with a different HAL. A similar
-system could also be implemented with another RTOS so long as it provides 
-equivalent services to ThreadX.
+    rtcan_transmit(&rtcan, &tx_msg);
+}
+```
+
+---
+
+## Integrating with `can-defs` (DBC Code Generation)
+
+In SUFST firmware projects, standard practice is to use code-generated C structures and pack/unpack helper functions compiled from the central [can-defs](https://github.com/sufst/can-defs) repository. 
+
+Using code generation alongside RTCAN ensures type safety and eliminates hardcoded CAN IDs and bit-shifting:
+
+### Example: Unpacking a Received Message
+```c
+#include "rtcan.h"
+#include "can_database.h" /* Generated from can-defs DBC */
+
+void app_process_thread(void* arg)
+{
+    rtcan_msg_t* rx_msg = NULL;
+    
+    if (rtcan_os_queue_receive(my_rx_queue, &rx_msg, RTCAN_OS_WAIT_FOREVER) == RTCAN_OS_OK)
+    {
+        /* Structure generated by cantools/can-defs */
+        struct can_database_vcu_state_t decoded_vcu;
+        
+        /* Unpack raw bytes into type-safe fields */
+        can_database_vcu_state_unpack(&decoded_vcu, rx_msg->data, rx_msg->length);
+        
+        /* Use decoded variables */
+        uint16_t pedal_position = decoded_vcu.throttle_pedal;
+        
+        /* Release message block */
+        rtcan_msg_consumed(&rtcan, rx_msg);
+    }
+}
+```
+
+### Example: Packing and Transmitting a Message
+```c
+#include "rtcan.h"
+#include "can_database.h"
+
+void send_bms_telemetry(void)
+{
+    struct can_database_bms_status_t bms_status = {
+        .accumulator_voltage = 580U,
+        .state_of_charge = 85U,
+        .error_flags = 0x00
+    };
+
+    rtcan_msg_t tx_msg;
+    tx_msg.identifier = CAN_DATABASE_BMS_STATUS_FRAME_ID;
+    tx_msg.extended = false;
+    tx_msg.length = CAN_DATABASE_BMS_STATUS_LENGTH;
+
+    /* Pack structured data into the raw CAN message buffer */
+    can_database_bms_status_pack(tx_msg.data, &bms_status, sizeof(tx_msg.data));
+
+    rtcan_transmit(&rtcan, &tx_msg);
+}
+```
+
+---
+
+## Mandatory Interrupt Service Routine (ISR) Mappings
+
+To hook the RTCAN engine up to the STM32 HAL callbacks, you must forward the callbacks inside your `stm32xx_it.c` or application callback code.
+
+### 1. Transmit Interrupts
+```c
+void HAL_CAN_TxMailbox0CompleteCallback(CAN_HandleTypeDef* hcan) {
+    rtcan_handle_tx_mailbox_callback(&rtcan, hcan);
+}
+void HAL_CAN_TxMailbox1CompleteCallback(CAN_HandleTypeDef* hcan) {
+    rtcan_handle_tx_mailbox_callback(&rtcan, hcan);
+}
+void HAL_CAN_TxMailbox2CompleteCallback(CAN_HandleTypeDef* hcan) {
+    rtcan_handle_tx_mailbox_callback(&rtcan, hcan);
+}
+```
+
+### 2. Receive Interrupts
+```c
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef* hcan) {
+    rtcan_handle_rx_it(&rtcan, hcan, CAN_RX_FIFO0);
+}
+void HAL_CAN_RxFifo1MsgPendingCallback(CAN_HandleTypeDef* hcan) {
+    rtcan_handle_rx_it(&rtcan, hcan, CAN_RX_FIFO1);
+}
+```
+
+### 3. Error Interrupts
+```c
+void HAL_CAN_ErrorCallback(CAN_HandleTypeDef* hcan) {
+    rtcan_handle_hal_error(&rtcan, hcan);
+}
+```
