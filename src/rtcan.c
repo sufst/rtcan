@@ -187,13 +187,17 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
     if (no_errors(rtcan_h))
     {
         HAL_StatusTypeDef hal_status = HAL_CAN_Start(rtcan_h->hcan);
-        
-        while (HAL_CAN_GetState(rtcan_h->hcan) != HAL_CAN_STATE_LISTENING)
-        {
-            /* Wait until listening */
-        }
-
         add_error_if(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+    }
+
+    if (no_errors(rtcan_h))
+    {
+        uint32_t retries = 10000U;
+        while ((HAL_CAN_GetState(rtcan_h->hcan) != HAL_CAN_STATE_LISTENING) && (retries > 0U))
+        {
+            retries--;
+        }
+        add_error_if(retries == 0U, RTCAN_ERROR_INIT, rtcan_h);
     }
 
     return create_status(rtcan_h);
@@ -217,9 +221,15 @@ rtcan_status_t rtcan_transmit(rtcan_handle_t* rtcan_h, rtcan_msg_t* msg_ptr)
     rtcan_osal_status_t os_status = rtcan_os_queue_send(rtcan_h->tx_queue,
                                                         (const void*) msg_ptr,
                                                         RTCAN_OS_NO_WAIT);
-    add_error_if(os_status != RTCAN_OS_OK, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
 
-    return create_status(rtcan_h);
+    /* Queue full is a transient flow-control condition — return error without
+       poisoning the handle so subsequent transmits can succeed */
+    if (os_status != RTCAN_OS_OK)
+    {
+        return RTCAN_ERROR;
+    }
+
+    return RTCAN_OK;
 }
 
 /**
@@ -475,66 +485,65 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
         return RTCAN_ERROR;
     }
 
-    if (!atomic_load(&rtcan_h->rx_ready))
+    /* Attempt to allocate a pool block only if the RX service is active */
+    rtcan_msg_t* msg_ptr = NULL;
+
+    if (atomic_load(&rtcan_h->rx_ready))
     {
-        /* Clear pending interrupt if receive service is disabled */
-        (void) HAL_CAN_GetRxMessage(rtcan_h->hcan, rx_fifo, NULL, NULL);
-        return RTCAN_OK;
+        rtcan_osal_status_t alloc_status = rtcan_os_block_allocate(rtcan_h->rx_msg_pool,
+                                                                   (void**) &msg_ptr,
+                                                                   RTCAN_OS_NO_WAIT);
+        add_error_if(alloc_status != RTCAN_OS_OK, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
     }
 
-    /* Allocate message block from static pool */
-    rtcan_msg_t* msg_ptr = NULL;
-    rtcan_osal_status_t os_status = rtcan_os_block_allocate(rtcan_h->rx_msg_pool,
-                                                            (void**) &msg_ptr,
-                                                            RTCAN_OS_NO_WAIT);
-    add_error_if(os_status != RTCAN_OS_OK, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
+    /* Always drain the FIFO — leaving it non-empty re-triggers the interrupt immediately.
+       If no pool block is available, read into a scratch buffer and discard. */
+    CAN_RxHeaderTypeDef header = {0};
+    uint8_t scratch[8];
+    uint8_t* data_buf = (msg_ptr != NULL) ? msg_ptr->data : scratch;
 
-    /* Retrieve message */
-    if (no_errors(rtcan_h) && (msg_ptr != NULL))
+    HAL_StatusTypeDef hal_status = HAL_CAN_GetRxMessage(rtcan_h->hcan,
+                                                        rx_fifo,
+                                                        &header,
+                                                        data_buf);
+
+    if (msg_ptr == NULL)
     {
-        CAN_RxHeaderTypeDef header = {0};
-        HAL_StatusTypeDef hal_status = HAL_CAN_GetRxMessage(rtcan_h->hcan,
-                                                            rx_fifo,
-                                                            &header,
-                                                            msg_ptr->data);
+        return create_status(rtcan_h);
+    }
 
-        if (hal_status == HAL_OK)
+    if (hal_status == HAL_OK)
+    {
+        if (header.IDE == CAN_ID_EXT)
         {
-            if (header.IDE == CAN_ID_EXT)
-            {
-                msg_ptr->identifier = header.ExtId;
-                msg_ptr->extended = true;
-            }
-            else
-            {
-                msg_ptr->identifier = header.StdId;
-                msg_ptr->extended = false;
-            }
-            msg_ptr->length = header.DLC;
-            atomic_store(&msg_ptr->reference_count, 0U);
+            msg_ptr->identifier = header.ExtId;
+            msg_ptr->extended = true;
         }
-        else 
+        else
         {
-            (void) rtcan_os_block_release(rtcan_h->rx_msg_pool, msg_ptr);
+            msg_ptr->identifier = header.StdId;
+            msg_ptr->extended = false;
         }
-
-        add_error_if(hal_status != HAL_OK, RTCAN_ERROR_INTERNAL, rtcan_h);
+        msg_ptr->length = header.DLC;
+        atomic_store(&msg_ptr->reference_count, 0U);
+    }
+    else
+    {
+        (void) rtcan_os_block_release(rtcan_h->rx_msg_pool, msg_ptr);
+        add_error_if(true, RTCAN_ERROR_INTERNAL, rtcan_h);
+        return create_status(rtcan_h);
     }
 
     /* Post message address to Rx distribution queue */
-    if (no_errors(rtcan_h) && (msg_ptr != NULL))
-    {
-        os_status = rtcan_os_queue_send(rtcan_h->rx_notif_queue, 
-                                        (const void*) &msg_ptr,
-                                        RTCAN_OS_NO_WAIT);
+    rtcan_osal_status_t send_status = rtcan_os_queue_send(rtcan_h->rx_notif_queue,
+                                                          (const void*) &msg_ptr,
+                                                          RTCAN_OS_NO_WAIT);
 
-        if (os_status != RTCAN_OS_OK)
-        {
-            /* If send failed, release the allocated block to prevent leakage */
-            (void) rtcan_os_block_release(rtcan_h->rx_msg_pool, msg_ptr);
-        }
-        add_error_if(os_status != RTCAN_OS_OK, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
+    if (send_status != RTCAN_OS_OK)
+    {
+        (void) rtcan_os_block_release(rtcan_h->rx_msg_pool, msg_ptr);
     }
+    add_error_if(send_status != RTCAN_OS_OK, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
 
     return create_status(rtcan_h);
 }
