@@ -211,7 +211,7 @@ typedef struct
     /**
      * @brief   Current error code
      */
-    uint32_t err;
+    _Atomic uint32_t err;
 
     /**
      * @brief   Flag for Rx service being ready

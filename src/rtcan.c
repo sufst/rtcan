@@ -31,7 +31,7 @@ static inline void add_error_if(bool cond, uint32_t error, rtcan_handle_t* inst)
 {
     if (cond)
     {
-        inst->err |= error;
+        atomic_fetch_or(&inst->err, error);
     }
 }
 
@@ -274,7 +274,7 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
     {
         if (rtcan_h != NULL)
         {
-            rtcan_h->err |= RTCAN_ERROR_ARG;
+            atomic_fetch_or(&rtcan_h->err, RTCAN_ERROR_ARG);
         }
         return RTCAN_ERROR;
     }
@@ -283,7 +283,7 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
                                                          RTCAN_OS_WAIT_FOREVER);
     if (os_status != RTCAN_OS_OK)
     {
-        rtcan_h->err |= RTCAN_ERROR_INTERNAL;
+        atomic_fetch_or(&rtcan_h->err, RTCAN_ERROR_INTERNAL);
         return RTCAN_ERROR;
     }
 
@@ -312,7 +312,7 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
 
     if (hal_status != HAL_OK)
     {
-        rtcan_h->err |= RTCAN_ERROR_INTERNAL;
+        atomic_fetch_or(&rtcan_h->err, RTCAN_ERROR_INTERNAL);
         /* Release the mailbox semaphore since adding message failed */
         (void) rtcan_os_sem_release(rtcan_h->tx_mailbox_sem);
     }
@@ -388,7 +388,7 @@ rtcan_status_t rtcan_subscribe(rtcan_handle_t* rtcan_h,
 
     if (new_sub == NULL)
     {
-        rtcan_h->err |= RTCAN_ERROR_MEMORY_FULL;
+        atomic_fetch_or(&rtcan_h->err, RTCAN_ERROR_MEMORY_FULL);
         return RTCAN_ERROR;
     }
 
@@ -664,23 +664,9 @@ rtcan_status_t rtcan_handle_hal_error(rtcan_handle_t* rtcan_h,
         return RTCAN_ERROR;
     }
 
-    uint32_t error = HAL_CAN_GetError(rtcan_h->hcan);
-
-    /* Check which mailboxes failed transmission and release the semaphore accordingly */
-    if (((error & HAL_CAN_ERROR_TX_TERR0) != 0U) || ((error & HAL_CAN_ERROR_TX_ALST0) != 0U))
-    {
-        (void) rtcan_os_sem_release(rtcan_h->tx_mailbox_sem);
-    }
-    if (((error & HAL_CAN_ERROR_TX_TERR1) != 0U) || ((error & HAL_CAN_ERROR_TX_ALST1) != 0U))
-    {
-        (void) rtcan_os_sem_release(rtcan_h->tx_mailbox_sem);
-    }
-    if (((error & HAL_CAN_ERROR_TX_TERR2) != 0U) || ((error & HAL_CAN_ERROR_TX_ALST2) != 0U))
-    {
-        (void) rtcan_os_sem_release(rtcan_h->tx_mailbox_sem);
-    }
-
-    /* Reset the error code in the HAL handle */
+    /* Reset the error code in the HAL handle.
+       TX semaphore is released by the abort callback, not here — releasing it
+       in both places causes a double-release on every NART TX failure. */
     rtcan_h->hcan->ErrorCode = HAL_CAN_ERROR_NONE;
 
     return RTCAN_OK;
@@ -699,7 +685,7 @@ uint32_t rtcan_get_error(rtcan_handle_t* rtcan_h)
     {
         return RTCAN_ERROR_ARG;
     }
-    return rtcan_h->err;
+    return atomic_load(&rtcan_h->err);
 }
 
 /**
@@ -707,7 +693,7 @@ uint32_t rtcan_get_error(rtcan_handle_t* rtcan_h)
  */
 static bool no_errors(const rtcan_handle_t* rtcan_h)
 {
-    return (rtcan_h->err == RTCAN_ERROR_NONE);
+    return (atomic_load(&rtcan_h->err) == RTCAN_ERROR_NONE);
 }
 
 /**
