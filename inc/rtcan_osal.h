@@ -24,6 +24,20 @@ typedef enum
 #define RTCAN_OS_WAIT_FOREVER 0xFFFFFFFFU
 #define RTCAN_OS_NO_WAIT      0x00000000U
 
+/* Minimum queue storage bytes for capacity messages of item_size bytes.
+   ThreadX embeds a TX_QUEUE control block at the front of the caller's buffer,
+   so the formula includes sizeof(TX_QUEUE). Requires -DRTCAN_OSAL_THREADX.
+   CMSIS-RTOS2 manages its own control block separately; only a 4-byte header
+   plus 12 bytes of per-message overhead beyond the aligned item payload is needed. */
+#if defined(RTCAN_OSAL_THREADX)
+#include <tx_api.h>
+#define RTCAN_OS_QUEUE_MEM_SIZE(capacity, item_size) \
+    (sizeof(TX_QUEUE) + (uint32_t)(capacity) * (((uint32_t)(item_size) + 3U) & ~3U))
+#else
+#define RTCAN_OS_QUEUE_MEM_SIZE(capacity, item_size) \
+    (4U + (uint32_t)(capacity) * (12U + (((uint32_t)(item_size) + 3U) & ~3U)))
+#endif
+
 /* Opaque pointer types for OS resources */
 typedef void* rtcan_thread_t;
 typedef void* rtcan_queue_t;
@@ -176,5 +190,10 @@ rtcan_osal_status_t rtcan_os_block_allocate(rtcan_block_pool_t pool,
  */
 rtcan_osal_status_t rtcan_os_block_release(rtcan_block_pool_t pool,
                                            void* block_ptr);
+
+/**
+ * @brief   Yield the current thread to allow other threads to run
+ */
+void rtcan_os_yield(void);
 
 #endif /* RTCAN_OSAL_H */

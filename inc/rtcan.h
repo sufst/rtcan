@@ -86,7 +86,7 @@ typedef struct
      * @brief   Reference count for dynamically allocated messages with multiple
      *          subscribers
      */
-    volatile _Atomic uint32_t reference_count;
+    _Atomic uint32_t reference_count;
 
     /**
      * @brief   Flag showing whether the message is an extended message
@@ -176,7 +176,7 @@ typedef struct
     /**
      * @brief   Receive notification queue memory area
      */
-    uint8_t rx_notif_queue_mem[RTCAN_RX_NOTIF_QUEUE_LENGTH * sizeof(rtcan_msg_t*)];
+    uint32_t rx_notif_queue_mem[RTCAN_OS_QUEUE_MEM_SIZE(RTCAN_RX_NOTIF_QUEUE_LENGTH, sizeof(rtcan_msg_t*)) / sizeof(uint32_t)];
 
     /**
      * @brief   Transmit queue
@@ -186,7 +186,7 @@ typedef struct
     /**
      * @brief   Transmit queue memory area
      */
-    uint8_t tx_queue_mem[RTCAN_TX_QUEUE_LENGTH * sizeof(rtcan_msg_t)];
+    uint32_t tx_queue_mem[RTCAN_OS_QUEUE_MEM_SIZE(RTCAN_TX_QUEUE_LENGTH, sizeof(rtcan_msg_t)) / sizeof(uint32_t)];
 
     /**
      * @brief   Static pool of subscriber structures
@@ -209,19 +209,19 @@ typedef struct
     rtcan_msg_t rx_msg_pool_mem[RTCAN_RX_MSG_POOL_SIZE];
 
     /**
+     * @brief   Mutex protecting subscriber_lut and subscriber_pool
+     */
+    rtcan_sem_t subscriber_mutex;
+
+    /**
      * @brief   Current error code
      */
     _Atomic uint32_t err;
 
     /**
-     * @brief   Flag for Rx service being ready
-     */
-    atomic_bool rx_ready;
-
-    /**
      * @brief   Flag indicating whether the service is started
      */
-    bool started;
+    _Atomic bool started;
 
 } rtcan_handle_t;
 
@@ -234,7 +234,7 @@ rtcan_status_t rtcan_init(rtcan_handle_t *rtcan_h,
 
 rtcan_status_t rtcan_start(rtcan_handle_t *rtcan_h);
 
-rtcan_status_t rtcan_transmit(rtcan_handle_t *rtcan_h, rtcan_msg_t *msg_ptr);
+rtcan_status_t rtcan_transmit(rtcan_handle_t *rtcan_h, const rtcan_msg_t *msg_ptr);
 
 rtcan_status_t rtcan_handle_tx_mailbox_callback(rtcan_handle_t *rtcan_h,
                                                 const CAN_HandleTypeDef *can_h);

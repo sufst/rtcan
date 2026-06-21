@@ -60,6 +60,8 @@ If you prefer submodules:
    - For CMSIS-RTOS v2: `src/rtcan_osal_cmsis2.c`
    - For ThreadX: `src/rtcan_osal_threadx.c`
 
+> **ThreadX only:** define `RTCAN_OSAL_THREADX` in your build (e.g. `-DRTCAN_OSAL_THREADX`). This switches `RTCAN_OS_QUEUE_MEM_SIZE` to a ThreadX-specific formula that accounts for the `TX_QUEUE` control block embedded at the front of each statically-allocated queue buffer. Without it, small queues (capacity ≤ 3 for pointer-sized items) will be undersized and queue creation will fail at init.
+
 ---
 
 ## API Usage Guide

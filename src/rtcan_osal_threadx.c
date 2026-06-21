@@ -11,14 +11,37 @@
 #define RTCAN_MAX_INSTANCES 2U
 #endif
 
+#ifndef RTCAN_THREADX_DEFAULT_STACK_SIZE
+#define RTCAN_THREADX_DEFAULT_STACK_SIZE 1024U
+#endif
+
+typedef struct {
+    rtcan_thread_entry_t entry;
+    void*                arg;
+} rtcan_thread_shim_t;
+
+typedef struct {
+    TX_SEMAPHORE tx_sem;
+    ULONG        ceiling;
+} rtcan_sem_entry_t;
+
 /* Static control blocks allocated for ThreadX backend */
 static TX_THREAD s_threads[RTCAN_MAX_INSTANCES * 2U];
-static TX_QUEUE s_queues[RTCAN_MAX_INSTANCES * 2U];
-static TX_SEMAPHORE s_sems[RTCAN_MAX_INSTANCES];
+static rtcan_sem_entry_t s_sems[RTCAN_MAX_INSTANCES * 2U];
 static TX_BLOCK_POOL s_pools[RTCAN_MAX_INSTANCES];
+static uint8_t s_default_stacks[RTCAN_MAX_INSTANCES * 2U][RTCAN_THREADX_DEFAULT_STACK_SIZE];
+static rtcan_thread_shim_t s_shims[RTCAN_MAX_INSTANCES * 2U];
+
+static VOID thread_entry_shim(ULONG idx)
+{
+    if (idx >= (RTCAN_MAX_INSTANCES * 2U))
+    {
+        return;
+    }
+    s_shims[idx].entry(s_shims[idx].arg);
+}
 
 static uint32_t s_thread_count = 0U;
-static uint32_t s_queue_count = 0U;
 static uint32_t s_sem_count = 0U;
 static uint32_t s_pool_count = 0U;
 
@@ -30,7 +53,7 @@ rtcan_osal_status_t rtcan_os_thread_create(rtcan_thread_t* thread,
                                            size_t stack_size,
                                            void* stack_mem)
 {
-    if ((thread == NULL) || (entry == NULL) || (stack_mem == NULL))
+    if ((thread == NULL) || (entry == NULL))
     {
         return RTCAN_OS_ERROR;
     }
@@ -41,12 +64,21 @@ rtcan_osal_status_t rtcan_os_thread_create(rtcan_thread_t* thread,
     }
 
     TX_THREAD* tx_thread = &s_threads[s_thread_count];
-    s_thread_count++;
+
+    if (stack_mem == NULL)
+    {
+        stack_mem = s_default_stacks[s_thread_count];
+        stack_size = RTCAN_THREADX_DEFAULT_STACK_SIZE;
+    }
+
+    s_shims[s_thread_count].entry = entry;
+    s_shims[s_thread_count].arg   = arg;
+    ULONG shim_idx = (ULONG)s_thread_count;
 
     UINT status = tx_thread_create(tx_thread,
                                    (CHAR*)name,
-                                   (VOID (*)(ULONG))entry,
-                                   (ULONG)arg,
+                                   thread_entry_shim,
+                                   shim_idx,
                                    stack_mem,
                                    (ULONG)stack_size,
                                    (UINT)priority,
@@ -58,6 +90,7 @@ rtcan_osal_status_t rtcan_os_thread_create(rtcan_thread_t* thread,
     {
         return RTCAN_OS_ERROR;
     }
+    s_thread_count++;
 
     *thread = (rtcan_thread_t)tx_thread;
     return RTCAN_OS_OK;
@@ -75,15 +108,20 @@ rtcan_osal_status_t rtcan_os_queue_create(rtcan_queue_t* queue,
         return RTCAN_OS_ERROR;
     }
 
-    if (s_queue_count >= (RTCAN_MAX_INSTANCES * 2U))
+    if (queue_mem_size <= sizeof(TX_QUEUE))
     {
         return RTCAN_OS_ERROR;
     }
 
-    TX_QUEUE* tx_queue = &s_queues[s_queue_count];
-    s_queue_count++;
+    /* TX_QUEUE control block lives at the front of the caller's buffer;
+       item data follows immediately after. The buffer must be uint32_t-
+       aligned (guaranteed by the uint32_t[] array types used at call sites),
+       which satisfies TX_QUEUE's alignment requirement on 32-bit ARM. */
+    TX_QUEUE* tx_queue = (TX_QUEUE*)queue_mem;
+    void*     data     = (uint8_t*)queue_mem + sizeof(TX_QUEUE);
+    ULONG     data_sz  = (ULONG)(queue_mem_size - sizeof(TX_QUEUE));
 
-    UINT message_size = (UINT)(item_size / sizeof(ULONG));
+    UINT message_size = (UINT)((item_size + sizeof(ULONG) - 1U) / sizeof(ULONG));
     if (message_size == 0U)
     {
         message_size = 1U;
@@ -92,8 +130,8 @@ rtcan_osal_status_t rtcan_os_queue_create(rtcan_queue_t* queue,
     UINT status = tx_queue_create(tx_queue,
                                   (CHAR*)name,
                                   message_size,
-                                  queue_mem,
-                                  (ULONG)queue_mem_size);
+                                  data,
+                                  data_sz);
 
     if (status != TX_SUCCESS)
     {
@@ -142,7 +180,7 @@ rtcan_osal_status_t rtcan_os_queue_receive(rtcan_queue_t queue,
     {
         return RTCAN_OS_OK;
     }
-    else if (status == TX_NO_INSTANCE)
+    else if (status == TX_QUEUE_EMPTY)
     {
         return RTCAN_OS_TIMEOUT;
     }
@@ -164,21 +202,22 @@ rtcan_osal_status_t rtcan_os_sem_create(rtcan_sem_t* sem,
         return RTCAN_OS_ERROR;
     }
 
-    if (s_sem_count >= RTCAN_MAX_INSTANCES)
+    if (s_sem_count >= (RTCAN_MAX_INSTANCES * 2U))
     {
         return RTCAN_OS_ERROR;
     }
 
-    TX_SEMAPHORE* tx_sem = &s_sems[s_sem_count];
-    s_sem_count++;
+    rtcan_sem_entry_t* entry = &s_sems[s_sem_count];
 
-    UINT status = tx_semaphore_create(tx_sem, (CHAR*)name, (ULONG)initial_count);
+    UINT status = tx_semaphore_create(&entry->tx_sem, (CHAR*)name, (ULONG)initial_count);
     if (status != TX_SUCCESS)
     {
         return RTCAN_OS_ERROR;
     }
+    entry->ceiling = (ULONG)max_count;
+    s_sem_count++;
 
-    *sem = (rtcan_sem_t)tx_sem;
+    *sem = (rtcan_sem_t)entry;
     return RTCAN_OS_OK;
 }
 
@@ -190,7 +229,8 @@ rtcan_osal_status_t rtcan_os_sem_acquire(rtcan_sem_t sem,
         return RTCAN_OS_ERROR;
     }
 
-    UINT status = tx_semaphore_get((TX_SEMAPHORE*)sem, (ULONG)timeout);
+    rtcan_sem_entry_t* entry = (rtcan_sem_entry_t*)sem;
+    UINT status = tx_semaphore_get(&entry->tx_sem, (ULONG)timeout);
     if (status == TX_SUCCESS)
     {
         return RTCAN_OS_OK;
@@ -212,8 +252,20 @@ rtcan_osal_status_t rtcan_os_sem_release(rtcan_sem_t sem)
         return RTCAN_OS_ERROR;
     }
 
-    UINT status = tx_semaphore_put((TX_SEMAPHORE*)sem);
-    return (status == TX_SUCCESS) ? RTCAN_OS_OK : RTCAN_OS_ERROR;
+    rtcan_sem_entry_t* entry = (rtcan_sem_entry_t*)sem;
+    UINT status = tx_semaphore_ceiling_put(&entry->tx_sem, entry->ceiling);
+    if (status == TX_SUCCESS)
+    {
+        return RTCAN_OS_OK;
+    }
+    else if (status == TX_CEILING_EXCEEDED)
+    {
+        return RTCAN_OS_ERROR;
+    }
+    else
+    {
+        return RTCAN_OS_ERROR;
+    }
 }
 
 rtcan_osal_status_t rtcan_os_block_pool_create(rtcan_block_pool_t* pool,
@@ -235,7 +287,6 @@ rtcan_osal_status_t rtcan_os_block_pool_create(rtcan_block_pool_t* pool,
     }
 
     TX_BLOCK_POOL* tx_pool = &s_pools[s_pool_count];
-    s_pool_count++;
 
     UINT status = tx_block_pool_create(tx_pool,
                                        (CHAR*)name,
@@ -247,6 +298,7 @@ rtcan_osal_status_t rtcan_os_block_pool_create(rtcan_block_pool_t* pool,
     {
         return RTCAN_OS_ERROR;
     }
+    s_pool_count++;
 
     *pool = (rtcan_block_pool_t)tx_pool;
     return RTCAN_OS_OK;
@@ -287,4 +339,9 @@ rtcan_osal_status_t rtcan_os_block_release(rtcan_block_pool_t pool,
 
     UINT status = tx_block_release(block_ptr);
     return (status == TX_SUCCESS) ? RTCAN_OS_OK : RTCAN_OS_ERROR;
+}
+
+void rtcan_os_yield(void)
+{
+    tx_thread_relinquish();
 }

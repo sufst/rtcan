@@ -83,7 +83,7 @@ rtcan_osal_status_t rtcan_os_queue_send(rtcan_queue_t queue,
     {
         return RTCAN_OS_OK;
     }
-    else if (status == osErrorTimeout)
+    else if (status == osErrorTimeout || status == osErrorResource)
     {
         return RTCAN_OS_TIMEOUT;
     }
@@ -107,7 +107,7 @@ rtcan_osal_status_t rtcan_os_queue_receive(rtcan_queue_t queue,
     {
         return RTCAN_OS_OK;
     }
-    else if (status == osErrorTimeout)
+    else if (status == osErrorTimeout || status == osErrorResource)
     {
         return RTCAN_OS_TIMEOUT;
     }
@@ -153,7 +153,7 @@ rtcan_osal_status_t rtcan_os_sem_acquire(rtcan_sem_t sem,
     {
         return RTCAN_OS_OK;
     }
-    else if (status == osErrorTimeout)
+    else if (status == osErrorTimeout || status == osErrorResource)
     {
         return RTCAN_OS_TIMEOUT;
     }
@@ -216,14 +216,9 @@ rtcan_osal_status_t rtcan_os_block_allocate(rtcan_block_pool_t pool,
     void* ptr = osMemoryPoolAlloc((osMemoryPoolId_t)pool, timeout);
     if (ptr == NULL)
     {
-        if (timeout == RTCAN_OS_NO_WAIT)
-        {
-            return RTCAN_OS_TIMEOUT;
-        }
-        else
-        {
-            return RTCAN_OS_ERROR;
-        }
+        /* osMemoryPoolAlloc returns NULL for both timeout and error; distinguish
+           by timeout value: WAIT_FOREVER only returns NULL on a genuine error. */
+        return (timeout == RTCAN_OS_WAIT_FOREVER) ? RTCAN_OS_ERROR : RTCAN_OS_TIMEOUT;
     }
 
     *block_ptr = ptr;
@@ -240,4 +235,9 @@ rtcan_osal_status_t rtcan_os_block_release(rtcan_block_pool_t pool,
 
     osStatus_t status = osMemoryPoolFree((osMemoryPoolId_t)pool, block_ptr);
     return (status == osOK) ? RTCAN_OS_OK : RTCAN_OS_ERROR;
+}
+
+void rtcan_os_yield(void)
+{
+    (void) osThreadYield();
 }
