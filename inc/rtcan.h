@@ -99,7 +99,7 @@ typedef struct
  * queue sizing constants
  */
 #define RTCAN_TX_QUEUE_LENGTH 10U
-#define RTCAN_RX_NOTIF_QUEUE_LENGTH 10U
+#define RTCAN_RX_NOTIF_QUEUE_LENGTH 32U
 
 /**
  * @brief RTCAN configuration structure
