@@ -27,6 +27,12 @@
 #define RTCAN_RX_MSG_POOL_SIZE 1000U // default, number of items
 #endif
 
+#ifdef RTCAN_OSAL_MAX_BLOCK_POOL_BLOCKS
+_Static_assert(RTCAN_RX_MSG_POOL_SIZE <= RTCAN_OSAL_MAX_BLOCK_POOL_BLOCKS,
+               "RTCAN_RX_MSG_POOL_SIZE exceeds the FreeRTOS OSAL backend's "
+               "static block pool capacity (RTCAN_OSAL_MAX_BLOCK_POOL_BLOCKS)");
+#endif
+
 #ifndef RTCAN_MAX_SUBSCRIBERS
 #define RTCAN_MAX_SUBSCRIBERS 32U // default, maximum simultaneous subscriptions
 #endif

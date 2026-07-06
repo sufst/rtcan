@@ -9,7 +9,7 @@ Designed for safety-critical Formula Student systems, the library is **RTOS-agno
 ## Key Features
 
 - **Operating System Abstraction Layer (OSAL):** Decoupled from any specific RTOS. Native wrappers are provided for:
-  - **CMSIS-RTOS v2** (e.g., FreeRTOS, RTX5, Zephyr) in `src/rtcan_osal_cmsis2.c`.
+  - **FreeRTOS** (via the CMSIS-RTOS v2 API) in `src/rtcan_osal_freertos.c`. Uses FreeRTOS's static allocation types directly for 100% static queues/pools, so it is not portable to other CMSIS-RTOS v2 kernels (e.g. RTX5, Zephyr).
   - **ThreadX** in `src/rtcan_osal_threadx.c` (retaining backward-compatibility with a 100% static control block pool).
 - **100% Static Allocation (MISRA C:2012 compliant):** All queues, message pools, and subscriber nodes are allocated statically at compile-time. There is no heap fragmentation or Out-of-Memory risk.
 - **Deterministic O(1) Lookup Table (LUT):** Replaced separate-chained collision hashmaps with a direct Lookup Table (2048 entries) for standard 11-bit CAN IDs, ensuring constant-time dispatch on the receive path.
@@ -23,7 +23,7 @@ Designed for safety-critical Formula Student systems, the library is **RTOS-agno
 
 - **C11 compiler** (uses `<stdatomic.h>`).
 - **32-bit STM32 Microcontroller** (uses STM32 HAL CAN drivers).
-- **An RTOS** supported by the OSAL backends (CMSIS-RTOS v2 or ThreadX).
+- **An RTOS** supported by the OSAL backends (FreeRTOS or ThreadX).
 
 ---
 
@@ -57,7 +57,7 @@ If you prefer submodules:
 2. Include the header directory `inc/` in your include paths.
 3. Add `src/rtcan.c` to your build sources.
 4. Add the appropriate OSAL wrapper to your build sources:
-   - For CMSIS-RTOS v2: `src/rtcan_osal_cmsis2.c`
+   - For FreeRTOS: `src/rtcan_osal_freertos.c`
    - For ThreadX: `src/rtcan_osal_threadx.c`
 
 > **ThreadX only:** define `RTCAN_OSAL_THREADX` in your build (e.g. `-DRTCAN_OSAL_THREADX`). This switches `RTCAN_OS_QUEUE_MEM_SIZE` to a ThreadX-specific formula that accounts for the `TX_QUEUE` control block embedded at the front of each statically-allocated queue buffer. Without it, small queues (capacity ≤ 3 for pointer-sized items) will be undersized and queue creation will fail at init.

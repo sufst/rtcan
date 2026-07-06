@@ -1,11 +1,30 @@
 /***************************************************************************
- * @file   rtcan_osal_cmsis2.c
+ * @file   rtcan_osal_freertos.c
  * @author Antigravity (Google DeepMind team)
- * @brief  CMSIS-RTOS v2 implementation of RTCAN OSAL
+ * @brief  FreeRTOS implementation of RTCAN OSAL (CMSIS-RTOS v2 API, using
+ *         FreeRTOS's static allocation types directly; not portable to
+ *         other CMSIS-RTOS v2 kernels)
  ***************************************************************************/
 
 #include "rtcan_osal.h"
 #include <cmsis_os2.h>
+#include <FreeRTOS.h>
+#include <queue.h>
+
+#if !defined(configSUPPORT_STATIC_ALLOCATION) || (configSUPPORT_STATIC_ALLOCATION == 0)
+#error "rtcan_osal_freertos.c requires configSUPPORT_STATIC_ALLOCATION == 1 in FreeRTOSConfig.h (static queue/control-block allocation)"
+#endif
+
+#ifndef RTCAN_MAX_INSTANCES
+#define RTCAN_MAX_INSTANCES 2U
+#endif
+
+static StaticQueue_t s_queue_cbs[RTCAN_MAX_INSTANCES * 2U];
+static uint32_t      s_queue_count = 0U;
+
+static StaticQueue_t s_pool_cbs[RTCAN_MAX_INSTANCES];
+static void*         s_pool_storage[RTCAN_MAX_INSTANCES][RTCAN_OSAL_MAX_BLOCK_POOL_BLOCKS];
+static uint32_t      s_pool_count = 0U;
 
 rtcan_osal_status_t rtcan_os_thread_create(rtcan_thread_t* thread,
                                            const char* name,
@@ -46,24 +65,30 @@ rtcan_osal_status_t rtcan_os_queue_create(rtcan_queue_t* queue,
                                           void* queue_mem,
                                           size_t queue_mem_size)
 {
-    if ((queue == NULL) || (item_size == 0U) || (capacity == 0U))
+    if ((queue == NULL) || (item_size == 0U) || (capacity == 0U) || (queue_mem == NULL) ||
+        (queue_mem_size < (capacity * item_size)))
+    {
+        return RTCAN_OS_ERROR;
+    }
+
+    if (s_queue_count >= (RTCAN_MAX_INSTANCES * 2U))
     {
         return RTCAN_OS_ERROR;
     }
 
     osMessageQueueAttr_t attr = {0};
     attr.name = name;
-    if (queue_mem != NULL)
-    {
-        attr.mq_mem = queue_mem;
-        attr.mq_size = (uint32_t)queue_mem_size;
-    }
+    attr.cb_mem = &s_queue_cbs[s_queue_count];
+    attr.cb_size = (uint32_t)sizeof(s_queue_cbs[0]);
+    attr.mq_mem = queue_mem;
+    attr.mq_size = (uint32_t)(capacity * item_size);
 
     osMessageQueueId_t mq = osMessageQueueNew((uint32_t)capacity, (uint32_t)item_size, &attr);
     if (mq == NULL)
     {
         return RTCAN_OS_ERROR;
     }
+    s_queue_count++;
 
     *queue = (rtcan_queue_t)mq;
     return RTCAN_OS_OK;
@@ -181,26 +206,47 @@ rtcan_osal_status_t rtcan_os_block_pool_create(rtcan_block_pool_t* pool,
                                                void* pool_mem,
                                                size_t pool_mem_size)
 {
-    if ((pool == NULL) || (block_size == 0U) || (block_count == 0U))
+    if ((pool == NULL) ||
+        (block_size == 0U) ||
+        (block_count == 0U) ||
+        (pool_mem == NULL) ||
+        (pool_mem_size < (block_size * block_count)) ||
+        (block_count > RTCAN_OSAL_MAX_BLOCK_POOL_BLOCKS))
     {
         return RTCAN_OS_ERROR;
     }
 
-    osMemoryPoolAttr_t attr = {0};
+    if (s_pool_count >= RTCAN_MAX_INSTANCES)
+    {
+        return RTCAN_OS_ERROR;
+    }
+
+    osMessageQueueAttr_t attr = {0};
     attr.name = name;
-    if (pool_mem != NULL)
-    {
-        attr.mp_mem = pool_mem;
-        attr.mp_size = (uint32_t)pool_mem_size;
-    }
+    attr.cb_mem = &s_pool_cbs[s_pool_count];
+    attr.cb_size = (uint32_t)sizeof(s_pool_cbs[0]);
+    attr.mq_mem = s_pool_storage[s_pool_count];
+    attr.mq_size = (uint32_t)(block_count * sizeof(void*));
 
-    osMemoryPoolId_t mp = osMemoryPoolNew((uint32_t)block_count, (uint32_t)block_size, &attr);
-    if (mp == NULL)
+    osMessageQueueId_t mq = osMessageQueueNew((uint32_t)block_count, sizeof(void*), &attr);
+    if (mq == NULL)
     {
         return RTCAN_OS_ERROR;
     }
 
-    *pool = (rtcan_block_pool_t)mp;
+    uint8_t* base = (uint8_t*) pool_mem;
+    for (size_t i = 0U; i < block_count; i++)
+    {
+        void* block = (void*)(base + (i * block_size));
+        if (osMessageQueuePut(mq, &block, 0U, 0U) != osOK)
+        {
+            (void) osMessageQueueDelete(mq);
+            return RTCAN_OS_ERROR;
+        }
+    }
+    s_pool_count++;
+
+    *pool = (rtcan_block_pool_t) mq;
     return RTCAN_OS_OK;
 }
 
@@ -213,16 +259,12 @@ rtcan_osal_status_t rtcan_os_block_allocate(rtcan_block_pool_t pool,
         return RTCAN_OS_ERROR;
     }
 
-    void* ptr = osMemoryPoolAlloc((osMemoryPoolId_t)pool, timeout);
-    if (ptr == NULL)
+    osStatus_t status = osMessageQueueGet((osMessageQueueId_t)pool, block_ptr, NULL, timeout);
+    if (status == osOK)
     {
-        /* osMemoryPoolAlloc returns NULL for both timeout and error; distinguish
-           by timeout value: WAIT_FOREVER only returns NULL on a genuine error. */
-        return (timeout == RTCAN_OS_WAIT_FOREVER) ? RTCAN_OS_ERROR : RTCAN_OS_TIMEOUT;
+        return RTCAN_OS_OK;
     }
-
-    *block_ptr = ptr;
-    return RTCAN_OS_OK;
+    return (status == osErrorTimeout || status == osErrorResource) ? RTCAN_OS_TIMEOUT : RTCAN_OS_ERROR;
 }
 
 rtcan_osal_status_t rtcan_os_block_release(rtcan_block_pool_t pool,
@@ -233,7 +275,7 @@ rtcan_osal_status_t rtcan_os_block_release(rtcan_block_pool_t pool,
         return RTCAN_OS_ERROR;
     }
 
-    osStatus_t status = osMemoryPoolFree((osMemoryPoolId_t)pool, block_ptr);
+    osStatus_t status = osMessageQueuePut((osMessageQueueId_t)pool, &block_ptr, 0U, 0U);
     return (status == osOK) ? RTCAN_OS_OK : RTCAN_OS_ERROR;
 }
 

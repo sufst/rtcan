@@ -27,8 +27,11 @@ typedef enum
 /* Minimum queue storage bytes for capacity messages of item_size bytes.
    ThreadX embeds a TX_QUEUE control block at the front of the caller's buffer,
    so the formula includes sizeof(TX_QUEUE). Requires -DRTCAN_OSAL_THREADX.
-   CMSIS-RTOS2 manages its own control block separately; only a 4-byte header
-   plus 12 bytes of per-message overhead beyond the aligned item payload is needed. */
+   CMSIS-RTOS2 only needs capacity * item_size bytes of raw payload storage
+   here (its control block is separate, statically owned by the OSAL backend);
+   the extra "4 + 12 per message" below is deliberately oversized slack on
+   that backend (harmless, just unused buffer space), kept so a single
+   formula can size both backends' buffers without ever undersizing either. */
 #if defined(RTCAN_OSAL_THREADX)
 #include <tx_api.h>
 #define RTCAN_OS_QUEUE_MEM_SIZE(capacity, item_size) \
@@ -36,6 +39,14 @@ typedef enum
 #else
 #define RTCAN_OS_QUEUE_MEM_SIZE(capacity, item_size) \
     (4U + (uint32_t)(capacity) * (12U + (((uint32_t)(item_size) + 3U) & ~3U)))
+
+/* Upper bound on block_count for rtcan_os_block_pool_create() on the FreeRTOS
+   backend (src/rtcan_osal_freertos.c), which backs each pool with a
+   statically-sized freelist array of this many pointers. Not used by the
+   ThreadX backend, which pools directly out of the caller's buffer. */
+#ifndef RTCAN_OSAL_MAX_BLOCK_POOL_BLOCKS
+#define RTCAN_OSAL_MAX_BLOCK_POOL_BLOCKS 1024U
+#endif
 #endif
 
 /* Opaque pointer types for OS resources */
@@ -75,8 +86,10 @@ rtcan_osal_status_t rtcan_os_thread_create(rtcan_thread_t* thread,
  * @param[in]       name            Queue name string
  * @param[in]       item_size       Size of each message item in bytes
  * @param[in]       capacity        Maximum number of items the queue can hold
- * @param[in]       queue_mem       Pointer to pre-allocated queue storage (optional, can be NULL)
- * @param[in]       queue_mem_size  Size of the pre-allocated queue storage in bytes
+ * @param[in]       queue_mem       Pointer to pre-allocated queue storage; required (non-NULL) on
+ *                                  both backends.
+ * @param[in]       queue_mem_size  Size of the pre-allocated queue storage in bytes; must be at
+ *                                  least capacity * item_size
  * 
  * @return          rtcan_osal_status_t
  */
@@ -155,8 +168,10 @@ rtcan_osal_status_t rtcan_os_sem_release(rtcan_sem_t sem);
  * @param[in]       name            Pool name string
  * @param[in]       block_size      Size of each memory block in bytes
  * @param[in]       block_count     Number of memory blocks in the pool
- * @param[in]       pool_mem        Pointer to pre-allocated block pool storage (optional, can be NULL)
- * @param[in]       pool_mem_size   Size of the pre-allocated block pool storage in bytes
+ * @param[in]       pool_mem        Pointer to pre-allocated block pool storage. Required (non-NULL)
+ *                                  on both backends.
+ * @param[in]       pool_mem_size   Size of the pre-allocated block pool storage in bytes; must be
+ *                                  at least block_size * block_count
  * 
  * @return          rtcan_osal_status_t
  */
