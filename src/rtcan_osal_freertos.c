@@ -19,7 +19,11 @@
 #define RTCAN_MAX_INSTANCES 2U
 #endif
 
-static StaticQueue_t s_queue_cbs[RTCAN_MAX_INSTANCES * 2U];
+#ifndef RTCAN_OSAL_MAX_QUEUES
+#define RTCAN_OSAL_MAX_QUEUES ((RTCAN_MAX_INSTANCES * 2U) + 8U)
+#endif
+
+static StaticQueue_t s_queue_cbs[RTCAN_OSAL_MAX_QUEUES];
 static uint32_t      s_queue_count = 0U;
 
 static StaticQueue_t s_pool_cbs[RTCAN_MAX_INSTANCES];
@@ -71,7 +75,7 @@ rtcan_osal_status_t rtcan_os_queue_create(rtcan_queue_t* queue,
         return RTCAN_OS_ERROR;
     }
 
-    if (s_queue_count >= (RTCAN_MAX_INSTANCES * 2U))
+    if (s_queue_count >= RTCAN_OSAL_MAX_QUEUES)
     {
         return RTCAN_OS_ERROR;
     }
