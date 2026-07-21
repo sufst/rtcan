@@ -37,6 +37,10 @@ _Static_assert(RTCAN_RX_MSG_POOL_SIZE <= RTCAN_OSAL_MAX_BLOCK_POOL_BLOCKS,
 #define RTCAN_MAX_SUBSCRIBERS 32U // default, maximum simultaneous subscriptions
 #endif
 
+#ifndef RTCAN_TX_MAILBOX_TIMEOUT_TICKS
+#define RTCAN_TX_MAILBOX_TIMEOUT_TICKS 100U // ~100 ms at the project's TX_TIMER_TICKS_PER_SECOND (1000, see tx_user.h)
+#endif
+
 /**
  * @brief   RTCAN status
  */

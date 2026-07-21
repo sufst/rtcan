@@ -297,7 +297,7 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
     }
 
     rtcan_osal_status_t os_status = rtcan_os_sem_acquire(rtcan_h->tx_mailbox_sem,
-                                                         RTCAN_OS_WAIT_FOREVER);
+                                                         RTCAN_TX_MAILBOX_TIMEOUT_TICKS);
     if (os_status != RTCAN_OS_OK)
     {
         atomic_fetch_or(&rtcan_h->err, RTCAN_ERROR_INTERNAL);
@@ -716,13 +716,30 @@ rtcan_status_t rtcan_handle_hal_error(rtcan_handle_t* rtcan_h,
         return RTCAN_ERROR;
     }
 
-    /* Reset the error code in the HAL handle.
-       TX semaphore is released by the abort callback, not here — releasing it
-       in both places causes a double-release on every NART TX failure.
-       WARNING: HAL_CAN_TxMailboxAbortCallback MUST be routed to
-       rtcan_handle_tx_mailbox_callback. If it is not, tx_mailbox_sem leaks
-       one count per aborted transmission and will eventually deadlock the
-       tx thread after three such events. */
+    /* Under NART, a TX mailbox that loses arbitration (ALST) or hits a bus
+       error (TERR) is dropped by hardware without ever invoking
+       HAL_CAN_TxMailboxXAbortCallback — HAL_CAN_IRQHandler only calls the
+       abort callback for an explicit software abort request, never for
+       ALST/TERR. The tx_mailbox_sem permit taken for that mailbox in
+       transmit_internal() would otherwise never be returned, permanently
+       leaking one count per event and eventually deadlocking the tx thread.
+       Release one permit per failed-mailbox bit before clearing the error. */
+    static const uint32_t tx_fail_bits[] = {
+        HAL_CAN_ERROR_TX_ALST0, HAL_CAN_ERROR_TX_TERR0,
+        HAL_CAN_ERROR_TX_ALST1, HAL_CAN_ERROR_TX_TERR1,
+        HAL_CAN_ERROR_TX_ALST2, HAL_CAN_ERROR_TX_TERR2
+    };
+
+    uint32_t error = HAL_CAN_GetError(can_h);
+
+    for (size_t i = 0; i < (sizeof(tx_fail_bits) / sizeof(tx_fail_bits[0])); i++)
+    {
+        if ((error & tx_fail_bits[i]) != 0U)
+        {
+            (void) rtcan_os_sem_release(rtcan_h->tx_mailbox_sem);
+        }
+    }
+
     rtcan_h->hcan->ErrorCode = HAL_CAN_ERROR_NONE;
 
     return RTCAN_OK;
