@@ -1,35 +1,22 @@
 /***************************************************************************
  * @file   rtcan.c
  * @author Tim Brewis (@t-bre, tab1g19@soton.ac.uk)
- * @brief  RTOS wrapper around CAN bus
+ *         Refactored by Antigravity (Google DeepMind team)
+ * @brief  RTOS-agnostic wrapper around CAN bus
  ***************************************************************************/
 
 #include "rtcan.h"
-
 #include <stdbool.h>
 #include <stdint.h>
-
-#include <memory.h>
-
-/*
- * thread constants
- */
-#define RTCAN_THREAD_STACK_SIZE 1024 // TODO: this needs to be profiled
-
-/*
- * useful macros
- */
-// #define ADD_ERROR_IF(cond, error, inst) if(cond) { inst->err |= error; }
-#define ADD_ERROR_IF(cond, error, inst) ;
+#include <string.h>
 
 /*
  * internal functions
  */
 static rtcan_status_t create_status(rtcan_handle_t* rtcan_h);
-static bool no_errors(rtcan_handle_t* rtcan_h);
-static uint32_t compute_hash(const uint32_t key);
-static void rtcan_tx_thread_entry(ULONG input);
-static void rtcan_rx_thread_entry(ULONG input);
+static bool no_errors(const rtcan_handle_t* rtcan_h);
+static void rtcan_tx_thread_entry(void* arg);
+static void rtcan_rx_thread_entry(void* arg);
 
 static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
                                         uint32_t identifier,
@@ -37,263 +24,147 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
                                         uint32_t data_length,
                                         bool extended);
 
+/**
+ * @brief       Static inline helper to safely set error code if condition is met
+ */
+static inline void add_error_if(bool cond, uint32_t error, rtcan_handle_t* inst)
+{
+    if (cond)
+    {
+        atomic_fetch_or(&inst->err, error);
+    }
+}
 
 //=============================================================== initialisation
 
 /**
  * @brief       Initialises the RTCAN instance
  *
- * @details     The CAN instance of the handle should not be used by any other
- *              part of the system
- *
- * @param[in]   rtcan_h         RTCAN handle
- * @param[in]   hcan            CAN handle
- * @param[in]   priority        Service thread priority
- * @param[in]   stack_pool_ptr  Memory pool to allocate stack memory from
+ * @param[in]   rtcan_h   RTCAN handle
+ * @param[in]   hcan      CAN handle
+ * @param[in]   config    RTCAN configuration structure
  */
 rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
                           CAN_HandleTypeDef* hcan,
-                          ULONG priority,
-                          TX_BYTE_POOL* stack_pool_ptr)
+                          const rtcan_config_t* config)
 {
+    if ((rtcan_h == NULL) || (hcan == NULL) || (config == NULL))
+    {
+        return RTCAN_ERROR;
+    }
+
+    if (rtcan_h->subscriber_mutex != NULL)
+    {
+        return RTCAN_ERROR;
+    }
+
     rtcan_h->hcan = hcan;
     rtcan_h->err = RTCAN_ERROR_NONE;
-    atomic_store(&rtcan_h->rx_ready, true);
+    atomic_store(&rtcan_h->started, false);
+    /* Initialize subscriber registry */
+    for (uint32_t i = 0U; i < RTCAN_MAX_SUBSCRIBERS; i++)
+    {
+        rtcan_h->subscriber_pool[i].queue_ptr = NULL;
+        rtcan_h->subscriber_pool[i].next_subscriber_ptr = NULL;
+        rtcan_h->subscriber_pool[i].in_use = false;
+    }
+    for (uint32_t i = 0U; i < 2048U; i++)
+    {
+        rtcan_h->subscriber_lut[i] = NULL;
+    }
 
-    // threads
-    void* stack_ptr = NULL;
+    /* Create subscriber mutex (binary semaphore) */
+    rtcan_osal_status_t sub_mutex_status = rtcan_os_sem_create(&rtcan_h->subscriber_mutex,
+                                                               "RTCAN Subscriber Mutex",
+                                                               1U,
+                                                               1U);
+    add_error_if(sub_mutex_status != RTCAN_OS_OK, RTCAN_ERROR_INIT, rtcan_h);
 
-    UINT tx_status = tx_byte_allocate(stack_pool_ptr,
-                                      &stack_ptr,
-                                      RTCAN_THREAD_STACK_SIZE,
-                                      TX_NO_WAIT);
-
-    ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
-
+    /* Create transmit queue */
     if (no_errors(rtcan_h))
     {
-        tx_status = tx_thread_create(&rtcan_h->tx_thread,
-                                     "RTCAN Tx Thread",
-                                     rtcan_tx_thread_entry,
-                                     (ULONG) rtcan_h,
-                                     stack_ptr,
-                                     RTCAN_THREAD_STACK_SIZE,
-                                     priority,
-                                     priority,
-                                     TX_NO_TIME_SLICE,
-                                     TX_DONT_START);
+        rtcan_osal_status_t os_status = rtcan_os_queue_create(&rtcan_h->tx_queue,
+                                                              "RTCAN Transmit Queue",
+                                                              sizeof(rtcan_msg_t),
+                                                              RTCAN_TX_QUEUE_LENGTH,
+                                                              rtcan_h->tx_queue_mem,
+                                                              sizeof(rtcan_h->tx_queue_mem));
+        add_error_if(os_status != RTCAN_OS_OK, RTCAN_ERROR_INIT, rtcan_h);
+    }
 
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
+    /* Create receive notification queue */
+    if (no_errors(rtcan_h))
+    {
+        rtcan_osal_status_t os_status = rtcan_os_queue_create(&rtcan_h->rx_notif_queue,
+                                                              "RTCAN Rx Notif Queue",
+                                                              sizeof(rtcan_msg_t*),
+                                                              RTCAN_RX_NOTIF_QUEUE_LENGTH,
+                                                              rtcan_h->rx_notif_queue_mem,
+                                                              sizeof(rtcan_h->rx_notif_queue_mem));
+        add_error_if(os_status != RTCAN_OS_OK, RTCAN_ERROR_INTERNAL, rtcan_h);
+    }
+
+    /* Create transmit mailbox semaphore (initial count = max count = 3 mailboxes) */
+    if (no_errors(rtcan_h))
+    {
+        const uint32_t mailbox_size = 3U;
+        rtcan_osal_status_t os_status = rtcan_os_sem_create(&rtcan_h->tx_mailbox_sem,
+                                                            "RTCAN Tx Mailbox Sem",
+                                                            mailbox_size,
+                                                            mailbox_size);
+        add_error_if(os_status != RTCAN_OS_OK, RTCAN_ERROR_INTERNAL, rtcan_h);
+    }
+
+    /* Create Rx message block pool */
+    if (no_errors(rtcan_h))
+    {
+        rtcan_osal_status_t os_status = rtcan_os_block_pool_create(&rtcan_h->rx_msg_pool,
+                                                                   "RTCAN Rx Message Pool",
+                                                                   sizeof(rtcan_msg_t),
+                                                                   RTCAN_RX_MSG_POOL_SIZE,
+                                                                   rtcan_h->rx_msg_pool_mem,
+                                                                   sizeof(rtcan_h->rx_msg_pool_mem));
+        add_error_if(os_status != RTCAN_OS_OK, RTCAN_ERROR_INTERNAL, rtcan_h);
+    }
+
+    /* Create background service threads */
+    if (no_errors(rtcan_h))
+    {
+        rtcan_osal_status_t os_status = rtcan_os_thread_create(&rtcan_h->tx_thread,
+                                                               "RTCAN Tx Thread",
+                                                               rtcan_tx_thread_entry,
+                                                               (void*) rtcan_h,
+                                                               config->thread_priority,
+                                                               config->tx_thread_stack_size,
+                                                               config->tx_thread_stack_mem);
+        add_error_if(os_status != RTCAN_OS_OK, RTCAN_ERROR_INIT, rtcan_h);
     }
 
     if (no_errors(rtcan_h))
     {
-        tx_status = tx_byte_allocate(stack_pool_ptr,
-                                     &stack_ptr,
-                                     RTCAN_THREAD_STACK_SIZE,
-                                     TX_NO_WAIT);
-
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
+        rtcan_osal_status_t os_status = rtcan_os_thread_create(&rtcan_h->rx_thread,
+                                                               "RTCAN Rx Thread",
+                                                               rtcan_rx_thread_entry,
+                                                               (void*) rtcan_h,
+                                                               config->thread_priority,
+                                                               config->rx_thread_stack_size,
+                                                               config->rx_thread_stack_mem);
+        add_error_if(os_status != RTCAN_OS_OK, RTCAN_ERROR_INIT, rtcan_h);
     }
 
-    if (no_errors(rtcan_h))
+    /* Configure CAN filters from passed array */
+    if (no_errors(rtcan_h) && (config->filters != NULL))
     {
-        tx_status = tx_thread_create(&rtcan_h->rx_thread,
-                                     "RTCAN Rx Thread",
-                                     rtcan_rx_thread_entry,
-                                     (ULONG) rtcan_h,
-                                     stack_ptr,
-                                     RTCAN_THREAD_STACK_SIZE,
-                                     priority,
-                                     priority,
-                                     TX_NO_TIME_SLICE,
-                                     TX_DONT_START);
-
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
-    }
-
-    // transmit queue
-    if (no_errors(rtcan_h))
-    {
-        tx_status = tx_queue_create(&rtcan_h->tx_queue,
-                                    "RTCAN Transmit Queue",
-                                    RTCAN_TX_QUEUE_ITEM_SIZE,
-                                    rtcan_h->tx_queue_mem,
-                                    RTCAN_TX_QUEUE_SIZE * sizeof(ULONG));
-
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
-    }
-
-    // transmit mailbox semaphore
-    if (no_errors(rtcan_h))
-    {
-        const uint32_t mailbox_size
-            = sizeof(rtcan_h->hcan->Instance->sTxMailBox)
-              / sizeof(CAN_TxMailBox_TypeDef);
-
-        tx_status
-            = tx_semaphore_create(&rtcan_h->tx_mailbox_sem, NULL, mailbox_size);
-
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
-    }
-
-    // receive notification queue
-    if (no_errors(rtcan_h))
-    {
-        tx_status = tx_queue_create(&rtcan_h->rx_notif_queue,
-                                    "RTCAN Receive Notification Queue",
-                                    RTCAN_RX_NOTIF_QUEUE_ITEM_SIZE,
-                                    rtcan_h->rx_notif_queue_mem,
-                                    RTCAN_RX_NOTIF_QUEUE_SIZE * sizeof(ULONG));
-
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
-    }
-
-    // clear hash table of subscribers
-    if (no_errors(rtcan_h))
-    {
-        for (uint32_t i = 0; i < RTCAN_HASHMAP_SIZE; i++)
+        for (uint32_t i = 0U; i < config->filter_count; i++)
         {
-            rtcan_h->subscriber_map[i] = NULL;
+            HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan,
+                                                                &config->filters[i]);
+            add_error_if(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
         }
-    }
-
-    // create subscriber memory pool
-    if (no_errors(rtcan_h))
-    {
-        UINT tx_status = tx_byte_pool_create(&rtcan_h->subscriber_pool, 
-                                             "RTCAN Subscriber Pool",
-                                             rtcan_h->subscriber_pool_mem,
-                                             RTCAN_SUBSCRIBER_POOL_SIZE);
-
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
-    }
-
-    // create rx message memory pool
-    if (no_errors(rtcan_h))
-    {
-        UINT tx_status = tx_block_pool_create(&rtcan_h->rx_msg_pool,
-                                              "RTCAN Rx Message Pool",
-                                              sizeof(rtcan_msg_t),
-                                              rtcan_h->rx_msg_pool_mem,
-                                              sizeof(rtcan_msg_t) * RTCAN_RX_MSG_POOL_SIZE);
-
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
-    }
-
-    // TODO: configure CAN filters
-    if (no_errors(rtcan_h))
-    {
-        // CAN_FilterTypeDef filter;
-        // filter.FilterActivation = ENABLE;
-        // filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        // filter.FilterIdHigh = 0x00AA << 5U; // pm100 internal states
-        // filter.FilterIdLow = 0x0000 << 5U;
-        // filter.FilterMaskIdHigh = 0x0000 << 5U;
-        // filter.FilterMaskIdLow = 0x0000 << 5U;
-        // filter.FilterMode = CAN_FILTERMODE_IDLIST;
-        // filter.FilterScale = CAN_FILTERSCALE_16BIT;
-        // filter.FilterBank = 0;
-
-        // HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-        //                                                     &filter);
-
-        CAN_FilterTypeDef filter;
-        filter.FilterActivation = ENABLE;
-        filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        filter.FilterIdHigh = 0xAA << 5U; // pm100 internal states
-        filter.FilterIdLow = 0x106 << 5U;   // vcu simulated messages
-        filter.FilterMaskIdHigh = 0x0000 << 5U;
-        filter.FilterMaskIdLow = 0x0000 << 5U;
-        filter.FilterMode = CAN_FILTERMODE_IDLIST;
-        filter.FilterScale = CAN_FILTERSCALE_16BIT;
-        filter.FilterBank = 0;
-
-        CAN_FilterTypeDef filter2;
-        filter2.FilterActivation = ENABLE;
-        filter2.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        filter2.FilterIdHigh = 0xA0 << 5U; // Temperature Set 1
-        filter2.FilterIdLow = 0xA1 << 5U;  // Temperature Set 2
-        filter2.FilterMaskIdHigh = 0x0000 << 5U;
-        filter2.FilterMaskIdLow = 0x0000 << 5U;
-        filter2.FilterMode = CAN_FILTERMODE_IDLIST;
-        filter2.FilterScale = CAN_FILTERSCALE_16BIT;
-        filter2.FilterBank = 1;
-
-        CAN_FilterTypeDef filter3;
-        filter3.FilterActivation = ENABLE;
-        filter3.FilterFIFOAssignment = CAN_FILTER_FIFO1;
-        filter3.FilterIdHigh = 0xAB << 5U; // pm100 fault codes
-        filter3.FilterIdLow = 0xA2 << 5U; // Temperature Set 3
-        filter3.FilterMaskIdHigh = 0x0000 << 5U;
-        filter3.FilterMaskIdLow = 0x0000 << 5U;
-        filter3.FilterMode = CAN_FILTERMODE_IDLIST;
-        filter3.FilterScale = CAN_FILTERSCALE_16BIT;
-        filter3.FilterBank = 2;
-
-        CAN_FilterTypeDef filter4;
-        filter4.FilterActivation = ENABLE;
-        filter4.FilterFIFOAssignment = CAN_FILTER_FIFO1;
-        filter4.FilterIdHigh = 0x503 << 5U; // pdm out voltage
-        filter4.FilterIdLow = 0xA5 << 5U; // pm100 info
-        filter4.FilterMaskIdHigh = 0x0000 << 5U;
-        filter4.FilterMaskIdLow = 0x0000 << 5U;
-        filter4.FilterMode = CAN_FILTERMODE_IDLIST;
-        filter4.FilterScale = CAN_FILTERSCALE_16BIT;
-        filter4.FilterBank = 3;
-
-        HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-            &filter);
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
-        hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-            &filter2);
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
-        hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-            &filter3);
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
-        hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-            &filter4);
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
-
-        // CAN_FilterTypeDef filter;
-        // filter.FilterActivation = ENABLE;
-        // filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
-        // filter.FilterIdHigh = 0xAA << 5U; // pm100 internal states
-        // filter.FilterIdLow = 0x106 << 5U;   // vcu simulated messages
-        // filter.FilterMaskIdHigh = 0xAB << 5U;  //pm100 fault codes
-        // filter.FilterMaskIdLow = 0xA2 << 5U;   // Temperature Set 3
-        // filter.FilterMode = CAN_FILTERMODE_IDLIST;
-        // filter.FilterScale = CAN_FILTERSCALE_16BIT;
-        // filter.FilterBank = 0;
-
-        // CAN_FilterTypeDef filter2;
-        // filter2.FilterActivation = ENABLE;
-        // filter2.FilterFIFOAssignment = CAN_FILTER_FIFO1;
-        // filter2.FilterIdHigh = 0xA0 << 5U; // Temperature Set 1
-        // filter2.FilterIdLow = 0xA1 << 5U;  // Temperature Set 2
-        // filter2.FilterMaskIdHigh = 0x0000 << 5U;
-        // filter2.FilterMaskIdLow = 0x0000 << 5U;
-        // filter2.FilterMode = CAN_FILTERMODE_IDLIST;
-        // filter2.FilterScale = CAN_FILTERSCALE_16BIT;
-        // filter2.FilterBank = 1;
-
-        // HAL_StatusTypeDef hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-        //     &filter);
-        // ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
-        // hal_status = HAL_CAN_ConfigFilter(rtcan_h->hcan, 
-        //     &filter2);
     }
 
     return create_status(rtcan_h);
 }
-
-// #define IS_CAN_IT(IT) ((IT) <= (CAN_IT_TX_MAILBOX_EMPTY     | CAN_IT_RX_FIFO0_MSG_PENDING      | \
-//                                 CAN_IT_RX_FIFO0_FULL        | CAN_IT_RX_FIFO0_OVERRUN          | \
-//                                 CAN_IT_RX_FIFO1_MSG_PENDING | CAN_IT_RX_FIFO1_FULL             | \
-//                                 CAN_IT_RX_FIFO1_OVERRUN     | CAN_IT_WAKEUP                    | \
-//                                 CAN_IT_SLEEP_ACK            | CAN_IT_ERROR_WARNING             | \
-//                                 CAN_IT_ERROR_PASSIVE        | CAN_IT_BUSOFF                    | \
-//                                 CAN_IT_LAST_ERROR_CODE      | CAN_IT_ERROR))
 
 /**
  * @brief   Starts the RTCAN service
@@ -302,15 +173,12 @@ rtcan_status_t rtcan_init(rtcan_handle_t* rtcan_h,
  */
 rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
 {
-    TX_THREAD* threads[2] = {&rtcan_h->tx_thread, &rtcan_h->rx_thread};
-
-    for (uint32_t i = 0; i < 2; i++)
+    if (rtcan_h == NULL)
     {
-        UINT tx_status = tx_thread_resume(threads[i]);
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INIT, rtcan_h);
+        return RTCAN_ERROR;
     }
 
-    // start peripheral
+    /* Start CAN peripheral interrupts */
     if (no_errors(rtcan_h))
     {
         const uint32_t notifs = CAN_IT_TX_MAILBOX_EMPTY
@@ -321,21 +189,32 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
                                 | CAN_IT_ERROR_PASSIVE
                                 | CAN_IT_ERROR_WARNING;
 
-        HAL_StatusTypeDef hal_status
-            = HAL_CAN_ActivateNotification(rtcan_h->hcan,
-                                           notifs);
+        HAL_StatusTypeDef hal_status = HAL_CAN_ActivateNotification(rtcan_h->hcan,
+                                                                    notifs);
+        add_error_if(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+    }
 
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+    /* Start the CAN peripheral */
+    if (no_errors(rtcan_h))
+    {
+        HAL_StatusTypeDef hal_status = HAL_CAN_Start(rtcan_h->hcan);
+        add_error_if(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
     }
 
     if (no_errors(rtcan_h))
     {
-        HAL_StatusTypeDef hal_status = HAL_CAN_Start(rtcan_h->hcan);
-        
-        while(HAL_CAN_GetState(rtcan_h->hcan) != HAL_CAN_STATE_LISTENING)
-            ;
+        uint32_t retries = 10000U;
+        while ((HAL_CAN_GetState(rtcan_h->hcan) != HAL_CAN_STATE_LISTENING) && (retries > 0U))
+        {
+            rtcan_os_yield();
+            retries--;
+        }
+        add_error_if(retries == 0U, RTCAN_ERROR_INIT, rtcan_h);
+    }
 
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INIT, rtcan_h);
+    if (no_errors(rtcan_h))
+    {
+        atomic_store(&rtcan_h->started, true);
     }
 
     return create_status(rtcan_h);
@@ -346,28 +225,32 @@ rtcan_status_t rtcan_start(rtcan_handle_t* rtcan_h)
 /**
  * @brief       Transmits a CAN message using the RTCAN service
  *
- * @details     The message is queued for transmission in a FIFO buffer, and the
- *              contents of the message is copied (!) to the buffer
- *
  * @param[in]   rtcan_h     RTCAN handle
  * @param[in]   msg_ptr     Pointer to message to transmit
  */
-rtcan_status_t rtcan_transmit(rtcan_handle_t* rtcan_h, rtcan_msg_t* msg_ptr)
+rtcan_status_t rtcan_transmit(rtcan_handle_t* rtcan_h, const rtcan_msg_t* msg_ptr)
 {
-    UINT tx_status
-        = tx_queue_send(&rtcan_h->tx_queue, (void*) msg_ptr, TX_NO_WAIT);
+    if ((rtcan_h == NULL) || (msg_ptr == NULL) || (!atomic_load(&rtcan_h->started)))
+    {
+        return RTCAN_ERROR;
+    }
 
-    ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
+    rtcan_osal_status_t os_status = rtcan_os_queue_send(rtcan_h->tx_queue,
+                                                        (const void*) msg_ptr,
+                                                        RTCAN_OS_NO_WAIT);
 
-    return create_status(rtcan_h);
+    /* Queue full is a transient flow-control condition — return error without
+       poisoning the handle so subsequent transmits can succeed */
+    if (os_status != RTCAN_OS_OK)
+    {
+        return RTCAN_ERROR;
+    }
+
+    return RTCAN_OK;
 }
 
 /**
  * @brief       Transmit mailbox callback
- *
- * @details     Increments the mailbox semaphore to allow the next message to be
- *              dispatched. This MUST be called by the user from
- *              HAL_CAN_TxMailbox<n>CompleteCallback, for all n.
  *
  * @param[in]   rtcan_h     RTCAN handle
  * @param[in]   can_h       CAN handle passed to HAL callback
@@ -375,11 +258,15 @@ rtcan_status_t rtcan_transmit(rtcan_handle_t* rtcan_h, rtcan_msg_t* msg_ptr)
 rtcan_status_t rtcan_handle_tx_mailbox_callback(rtcan_handle_t* rtcan_h,
                                                 const CAN_HandleTypeDef* can_h)
 {
+    if ((rtcan_h == NULL) || (can_h == NULL))
+    {
+        return RTCAN_ERROR;
+    }
+
     if (rtcan_h->hcan == can_h)
     {
-        UINT tx_status = tx_semaphore_put(&rtcan_h->tx_mailbox_sem);
-
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
+        rtcan_osal_status_t os_status = rtcan_os_sem_release(rtcan_h->tx_mailbox_sem);
+        add_error_if(os_status != RTCAN_OS_OK, RTCAN_ERROR_INTERNAL, rtcan_h);
     }
 
     return create_status(rtcan_h);
@@ -387,14 +274,12 @@ rtcan_status_t rtcan_handle_tx_mailbox_callback(rtcan_handle_t* rtcan_h,
 
 /**
  * @brief       Internal transmit for RTCAN service thread
- *
- * @details     Blocks RTCAN service if CAN transmit mailbox unavailable
  * 
  * @param[in]   rtcan_h         RTCAN handle
- * @param[in]   identifier      CAN standard identifier
+ * @param[in]   identifier      CAN identifier
  * @param[in]   data_ptr        Pointer to data to transmit
  * @param[in]   data_length     Length of data to transmit
- * @param[in]   extended        Flag as to whether this is an extended frame to send
+ * @param[in]   extended        Flag showing whether this is an extended frame
  */
 static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
                                         uint32_t identifier,
@@ -402,46 +287,51 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
                                         uint32_t data_length,
                                         const bool extended)
 {
-    if ((data_ptr == NULL) || (data_length == 0U))
+    if ((rtcan_h == NULL) || (data_ptr == NULL) || (data_length == 0U) || (data_length > 8U))
     {
-        rtcan_h->err |= RTCAN_ERROR_ARG;
-    }
-
-    if (tx_semaphore_get(&rtcan_h->tx_mailbox_sem, TX_WAIT_FOREVER)
-        != TX_SUCCESS)
-    {
-        rtcan_h->err |= RTCAN_ERROR_INTERNAL;
-    }
-
-    // if (no_errors(rtcan_h))
-    {
-        // create message
-        CAN_TxHeaderTypeDef header = {
-            .RTR = CAN_RTR_DATA,
-            .DLC = data_length
-        };
-
-        if(extended){
-            header.IDE = CAN_ID_EXT;
-            header.ExtId = identifier;
-        } else {
-            header.IDE = CAN_ID_STD;
-            header.StdId = identifier;
-        }
-
-        // send it
-        uint32_t tx_mailbox;
-
-        HAL_StatusTypeDef hal_status = HAL_CAN_AddTxMessage(rtcan_h->hcan,
-                                                            &header,
-                                                            data_ptr,
-                                                            &tx_mailbox);
-
-
-        if (hal_status != HAL_OK)
+        if (rtcan_h != NULL)
         {
-            rtcan_h->err |= RTCAN_ERROR_INTERNAL;
+            atomic_fetch_or(&rtcan_h->err, RTCAN_ERROR_ARG);
         }
+        return RTCAN_ERROR;
+    }
+
+    rtcan_osal_status_t os_status = rtcan_os_sem_acquire(rtcan_h->tx_mailbox_sem,
+                                                         RTCAN_TX_MAILBOX_TIMEOUT_TICKS);
+    if (os_status != RTCAN_OS_OK)
+    {
+        atomic_fetch_or(&rtcan_h->err, RTCAN_ERROR_INTERNAL);
+        return RTCAN_ERROR;
+    }
+
+    /* Create Tx Header */
+    CAN_TxHeaderTypeDef header = {0};
+    header.RTR = CAN_RTR_DATA;
+    header.DLC = data_length;
+
+    if (extended)
+    {
+        header.IDE = CAN_ID_EXT;
+        header.ExtId = identifier;
+    }
+    else
+    {
+        header.IDE = CAN_ID_STD;
+        header.StdId = identifier;
+    }
+
+    /* Send message to mailbox */
+    uint32_t tx_mailbox = 0U;
+    HAL_StatusTypeDef hal_status = HAL_CAN_AddTxMessage(rtcan_h->hcan,
+                                                        &header,
+                                                        data_ptr,
+                                                        &tx_mailbox);
+
+    if (hal_status != HAL_OK)
+    {
+        atomic_fetch_or(&rtcan_h->err, RTCAN_ERROR_INTERNAL);
+        /* Release the mailbox semaphore since adding message failed */
+        (void) rtcan_os_sem_release(rtcan_h->tx_mailbox_sem);
     }
 
     return create_status(rtcan_h);
@@ -449,21 +339,19 @@ static rtcan_status_t transmit_internal(rtcan_handle_t* rtcan_h,
 
 /**
  * @brief       Entry function for RTCAN transmit service thread
- *
- * @param[in]   input   RTCAN handle
  */
-static void rtcan_tx_thread_entry(ULONG input)
+static void rtcan_tx_thread_entry(void* arg)
 {
-    rtcan_handle_t* rtcan_h = (rtcan_handle_t*) input;
+    rtcan_handle_t* rtcan_h = (rtcan_handle_t*) arg;
 
     while (1)
     {
-        const rtcan_msg_t message;
-        UINT tx_status = tx_queue_receive(&rtcan_h->tx_queue,
-                                          (void*) &message,
-                                          TX_WAIT_FOREVER);
+        rtcan_msg_t message;
+        rtcan_osal_status_t os_status = rtcan_os_queue_receive(rtcan_h->tx_queue,
+                                                               (void*) &message,
+                                                               RTCAN_OS_WAIT_FOREVER);
 
-        if (tx_status == TX_SUCCESS)
+        if (os_status == RTCAN_OS_OK)
         {
             (void) transmit_internal(rtcan_h,
                                      message.identifier,
@@ -471,212 +359,150 @@ static void rtcan_tx_thread_entry(ULONG input)
                                      message.length,
                                      message.extended);
         }
-        else
-        {
-            // TODO: handle error
-        }
     }
 }
 
 //================================================================ subscriptions
 
 /**
- * @brief   Computes a hash for a single word
- * 
- * @details This implements a Jenkins hash which was chosen for its balance 
- *          between speed and distribution. The input data of CAN message
- *          IDs is small.
- */
-static uint32_t compute_hash(const uint32_t key)
-{
-    uint32_t hash = key;
-    hash += (hash << 12);
-    hash ^= (hash >> 22);
-    hash += (hash << 4);
-    hash ^= (hash >> 9);
-    hash += (hash << 10);
-    hash ^= (hash >> 2);
-    hash += (hash << 7);
-    hash ^= (hash >> 12);
-    return hash;
-}
-
-/**
- * @brief   Computes an index in the hash table of subscribers
- */
-static inline uint32_t hashmap_index(const uint32_t can_id)
-{
-    return compute_hash(can_id) % RTCAN_HASHMAP_SIZE;
-}
-
-/**
- * @brief       Creates a hashmap node
- * 
- * @param[in]   rtcan_h     RTCAN handle
- * @param[in]   can_id      CAN ID of node
- */
-static rtcan_hashmap_node_t* create_hashmap_node(rtcan_handle_t* rtcan_h,   
-                                                 uint32_t can_id)
-{
-    rtcan_hashmap_node_t* new_node_ptr = NULL;
-
-    ULONG status = tx_byte_allocate(&rtcan_h->subscriber_pool, 
-                                    (void**) &new_node_ptr,
-                                    sizeof(rtcan_hashmap_node_t),
-                                    TX_NO_WAIT);
-
-    ADD_ERROR_IF(status != TX_SUCCESS, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
-
-    if (no_errors(rtcan_h))
-    {
-        new_node_ptr->chained_node_ptr = NULL;
-        new_node_ptr->can_id = can_id;
-    }
-
-    return new_node_ptr;
-}
-
-/**
- * @brief       Creates a subscriber node
- * 
- * @param[in]   rtcan_h     RTCAN handle
- * @param[in]   queue_ptr   Pointer to subscriber's associated queue
- */
-static rtcan_subscriber_t* create_subscriber(rtcan_handle_t* rtcan_h,
-                                         TX_QUEUE* queue_ptr)
-{
-    rtcan_subscriber_t* new_subscriber_ptr = NULL;
-
-    ULONG status = tx_byte_allocate(&rtcan_h->subscriber_pool, 
-                                    (void**) &new_subscriber_ptr,
-                                    sizeof(rtcan_subscriber_t),
-                                    TX_NO_WAIT);
-
-    ADD_ERROR_IF(status != TX_SUCCESS, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
-
-    if (no_errors(rtcan_h))
-    {
-        new_subscriber_ptr->next_subscriber_ptr = NULL;
-        new_subscriber_ptr->queue_ptr = queue_ptr;
-    }
-    
-    return new_subscriber_ptr;
-}
-
-/**
- * @brief       Returns a pointer to the hashmap node with the given CAN ID, or
- *              null if there are no nodes with that ID
- * 
- * @param[in]   rtcan_h     RTCAN handle
- * @param[in]   can_id      CAN ID
- */
-static rtcan_hashmap_node_t* find_hashmap_node(rtcan_handle_t* rtcan_h,
-                                               const uint32_t can_id)
-{
-    const uint32_t index = hashmap_index(can_id);
-    return rtcan_h->subscriber_map[index];
-}
-
-/**
- * @brief       Appends a subscriber to an existing node in the hashmap
- */
-
-/**
  * @brief       Adds a subscriber which will receive notifications of incoming
- *              CAN messages via a TX_QUEUE
- * 
- * @details     Hash collisions are handled by collision chaining with a singly
- *              linked list. Each node in the hash map (or chain) consists
- *              of a singly linked list of subscribers for the given CAN ID.
+ *              CAN messages via an rtcan_queue_t
  * 
  * @param[in]   rtcan_h     RTCAN handle
- * @param[in]   can_id      CAN ID to receive notification for
+ * @param[in]   can_id      CAN ID to receive notification for (Standard 11-bit ID)
  * @param[in]   queue_ptr   Destination to receive messages
  */
 rtcan_status_t rtcan_subscribe(rtcan_handle_t* rtcan_h,
                                uint32_t can_id, 
-                               TX_QUEUE* queue_ptr)
+                               rtcan_queue_t queue_ptr)
 {
-    const uint32_t index = hashmap_index(can_id);
-
-    // first time for this CAN ID, no collision
-    if (rtcan_h->subscriber_map[index] == NULL)
+    if ((rtcan_h == NULL) || (queue_ptr == NULL) || (can_id >= 2048U))
     {
-        rtcan_hashmap_node_t* new_node_ptr = create_hashmap_node(rtcan_h, 
-                                                                 can_id);
+        return RTCAN_ERROR;
+    }
 
-        if (no_errors(rtcan_h))
-        {  
-            new_node_ptr->first_subscriber_ptr = create_subscriber(rtcan_h, 
-                                                                   queue_ptr);
-        }
+    rtcan_osal_status_t os_status = rtcan_os_sem_acquire(rtcan_h->subscriber_mutex,
+                                                         RTCAN_OS_WAIT_FOREVER);
+    if (os_status != RTCAN_OS_OK)
+    {
+        atomic_fetch_or(&rtcan_h->err, RTCAN_ERROR_INTERNAL);
+        return RTCAN_ERROR;
+    }
 
-        if (no_errors(rtcan_h))
+    /* Check if already subscribed to prevent duplicates */
+    rtcan_subscriber_t* sub = rtcan_h->subscriber_lut[can_id];
+    while (sub != NULL)
+    {
+        if (sub->queue_ptr == queue_ptr)
         {
-            rtcan_h->subscriber_map[index] = new_node_ptr;
+            (void) rtcan_os_sem_release(rtcan_h->subscriber_mutex);
+            return RTCAN_OK; /* Already subscribed */
+        }
+        sub = sub->next_subscriber_ptr;
+    }
+
+    /* Find a free subscriber node in the static pool */
+    rtcan_subscriber_t* new_sub = NULL;
+    for (uint32_t i = 0U; i < RTCAN_MAX_SUBSCRIBERS; i++)
+    {
+        if (!rtcan_h->subscriber_pool[i].in_use)
+        {
+            new_sub = &rtcan_h->subscriber_pool[i];
+            break;
         }
     }
-    // hash collision, or another subscriber for an existing ID in the map
+
+    if (new_sub == NULL)
+    {
+        atomic_fetch_or(&rtcan_h->err, RTCAN_ERROR_MEMORY_FULL);
+        (void) rtcan_os_sem_release(rtcan_h->subscriber_mutex);
+        return RTCAN_ERROR;
+    }
+
+    /* Configure node */
+    new_sub->queue_ptr = queue_ptr;
+    new_sub->next_subscriber_ptr = NULL;
+    new_sub->in_use = true;
+
+    /* Add node to standard ID lookup table */
+    if (rtcan_h->subscriber_lut[can_id] == NULL)
+    {
+        rtcan_h->subscriber_lut[can_id] = new_sub;
+    }
     else
     {
-        rtcan_hashmap_node_t* node_ptr = rtcan_h->subscriber_map[index];
-
-        if (node_ptr->can_id != can_id) // hash collision, do chaining
+        sub = rtcan_h->subscriber_lut[can_id];
+        while (sub->next_subscriber_ptr != NULL)
         {
-            bool id_in_chain = false;
-
-            while (node_ptr->chained_node_ptr != NULL)
-            {
-                node_ptr = node_ptr->chained_node_ptr;
-
-                if (node_ptr->can_id == can_id)
-                {
-                    id_in_chain = true;
-                    break;
-                }
-            }
-
-            if (!id_in_chain) // create new chained node
-            {
-                node_ptr->chained_node_ptr = create_hashmap_node(rtcan_h, 
-                                                                 can_id);
-
-                if (no_errors(rtcan_h))
-                {
-                    node_ptr = node_ptr->chained_node_ptr;
-                    node_ptr->first_subscriber_ptr = create_subscriber(rtcan_h, 
-                                                                       queue_ptr);
-                }
-            }
-            else // add to existing node
-            {
-                rtcan_subscriber_t* subscriber_ptr = node_ptr->first_subscriber_ptr;
-
-                while (subscriber_ptr->next_subscriber_ptr != NULL)
-                {
-                    subscriber_ptr = subscriber_ptr->next_subscriber_ptr;
-                }
-
-                subscriber_ptr->next_subscriber_ptr = create_subscriber(rtcan_h, 
-                                                                        queue_ptr);
-            }
-
+            sub = sub->next_subscriber_ptr;
         }
-        else // no collision, append to this node
-        {
-            rtcan_subscriber_t* subscriber_ptr = node_ptr->first_subscriber_ptr;
-
-            while (subscriber_ptr->next_subscriber_ptr != NULL)
-            {
-                subscriber_ptr = subscriber_ptr->next_subscriber_ptr;
-            }
-
-            subscriber_ptr->next_subscriber_ptr = create_subscriber(rtcan_h, 
-                                                                    queue_ptr);
-        }
+        sub->next_subscriber_ptr = new_sub;
     }
 
-    return create_status(rtcan_h);
+    (void) rtcan_os_sem_release(rtcan_h->subscriber_mutex);
+    return RTCAN_OK;
+}
+
+/**
+ * @brief       Removes a subscriber, preventing memory leaks in static pools
+ * 
+ * @param[in]   rtcan_h     RTCAN handle
+ * @param[in]   can_id      CAN ID associated with subscriber
+ * @param[in]   queue_ptr   Queue to identify subscriber
+ */
+rtcan_status_t rtcan_unsubscribe(rtcan_handle_t* rtcan_h,
+                                 uint32_t can_id,
+                                 rtcan_queue_t queue_ptr)
+{
+    if ((rtcan_h == NULL) || (queue_ptr == NULL) || (can_id >= 2048U))
+    {
+        return RTCAN_ERROR;
+    }
+
+    rtcan_osal_status_t os_status = rtcan_os_sem_acquire(rtcan_h->subscriber_mutex,
+                                                         RTCAN_OS_WAIT_FOREVER);
+    if (os_status != RTCAN_OS_OK)
+    {
+        atomic_fetch_or(&rtcan_h->err, RTCAN_ERROR_INTERNAL);
+        return RTCAN_ERROR;
+    }
+
+    rtcan_subscriber_t* sub = rtcan_h->subscriber_lut[can_id];
+    if (sub == NULL)
+    {
+        (void) rtcan_os_sem_release(rtcan_h->subscriber_mutex);
+        return RTCAN_ERROR; /* Not found */
+    }
+
+    rtcan_subscriber_t* prev = NULL;
+    bool found = false;
+
+    while (sub != NULL)
+    {
+        if (sub->queue_ptr == queue_ptr)
+        {
+            found = true;
+            if (prev == NULL)
+            {
+                rtcan_h->subscriber_lut[can_id] = sub->next_subscriber_ptr;
+            }
+            else
+            {
+                prev->next_subscriber_ptr = sub->next_subscriber_ptr;
+            }
+
+            /* Reset the pool node and mark it as free */
+            sub->queue_ptr = NULL;
+            sub->next_subscriber_ptr = NULL;
+            sub->in_use = false;
+            break;
+        }
+        prev = sub;
+        sub = sub->next_subscriber_ptr;
+    }
+
+    (void) rtcan_os_sem_release(rtcan_h->subscriber_mutex);
+    return found ? RTCAN_OK : RTCAN_ERROR;
 }
 
 //=================================================================== rx service
@@ -692,57 +518,65 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
                                   const CAN_HandleTypeDef* can_h,
                                   const uint32_t rx_fifo)
 {
-    if (!atomic_load(&rtcan_h->rx_ready))
+    if ((rtcan_h == NULL) || (can_h == NULL) || (rtcan_h->hcan != can_h))
     {
-        HAL_CAN_GetRxMessage(rtcan_h->hcan,
-                             rx_fifo,
-                             NULL,
-                             NULL);
-        return RTCAN_OK;
+        return RTCAN_ERROR;
     }
 
-    // allocate message
     rtcan_msg_t* msg_ptr = NULL;
+    rtcan_osal_status_t alloc_status = rtcan_os_block_allocate(rtcan_h->rx_msg_pool,
+                                                               (void**) &msg_ptr,
+                                                               RTCAN_OS_NO_WAIT);
+    add_error_if(alloc_status != RTCAN_OS_OK, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
 
-    UINT tx_status = tx_block_allocate(&rtcan_h->rx_msg_pool,
-                                       (void**) &msg_ptr,
-                                       TX_NO_WAIT);
+    /* Always drain the FIFO — leaving it non-empty re-triggers the interrupt immediately.
+       If no pool block is available, read into a scratch buffer and discard. */
+    CAN_RxHeaderTypeDef header = {0};
+    uint8_t scratch[8];
+    uint8_t* data_buf = (msg_ptr != NULL) ? msg_ptr->data : scratch;
 
-    ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
+    HAL_StatusTypeDef hal_status = HAL_CAN_GetRxMessage(rtcan_h->hcan,
+                                                        rx_fifo,
+                                                        &header,
+                                                        data_buf);
 
-    // retrieve message
-    if (no_errors(rtcan_h))
+    if (msg_ptr == NULL)
     {
-        CAN_RxHeaderTypeDef header;
+        return create_status(rtcan_h);
+    }
 
-        HAL_StatusTypeDef hal_status = HAL_CAN_GetRxMessage(rtcan_h->hcan,
-                                                            rx_fifo,
-                                                            &header,
-                                                            msg_ptr->data);
-
-        if (hal_status == HAL_OK)
+    if (hal_status == HAL_OK)
+    {
+        if (header.IDE == CAN_ID_EXT)
+        {
+            msg_ptr->identifier = header.ExtId;
+            msg_ptr->extended = true;
+        }
+        else
         {
             msg_ptr->identifier = header.StdId;
-            msg_ptr->length = header.DLC;
-            msg_ptr->reference_count = 0;
+            msg_ptr->extended = false;
         }
-        else 
-        {
-            tx_block_release(msg_ptr);
-        }
-
-        ADD_ERROR_IF(hal_status != HAL_OK, RTCAN_ERROR_INTERNAL, rtcan_h);
+        msg_ptr->length = header.DLC;
+        atomic_store(&msg_ptr->reference_count, 0U);
     }
-
-    // send to Rx thread for distribution
-    if (no_errors(rtcan_h))
+    else
     {
-        tx_status = tx_queue_send(&rtcan_h->rx_notif_queue, 
-                                  (void*) &msg_ptr,
-                                  TX_NO_WAIT);
-
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
+        (void) rtcan_os_block_release(rtcan_h->rx_msg_pool, msg_ptr);
+        add_error_if(true, RTCAN_ERROR_INTERNAL, rtcan_h);
+        return create_status(rtcan_h);
     }
+
+    /* Post message address to Rx distribution queue */
+    rtcan_osal_status_t send_status = rtcan_os_queue_send(rtcan_h->rx_notif_queue,
+                                                          (const void*) &msg_ptr,
+                                                          RTCAN_OS_NO_WAIT);
+
+    if (send_status != RTCAN_OS_OK)
+    {
+        (void) rtcan_os_block_release(rtcan_h->rx_msg_pool, msg_ptr);
+    }
+    add_error_if(send_status != RTCAN_OS_OK, RTCAN_ERROR_MEMORY_FULL, rtcan_h);
 
     return create_status(rtcan_h);
 }
@@ -750,22 +584,28 @@ rtcan_status_t rtcan_handle_rx_it(rtcan_handle_t* rtcan_h,
 /**
  * @brief       Call after message received via subscription has been used
  * 
- * @note        If this is not done, RTCAN will eventually run out of memory to
- *              store CAN messages!
- * 
  * @param[in]   rtcan_h     RTCAN handle
  * @param[in]   msg_ptr     Pointer to message
  */
 rtcan_status_t rtcan_msg_consumed(rtcan_handle_t* rtcan_h,
                                   rtcan_msg_t* msg_ptr)
 {
-    (void) rtcan_h;
-
-    msg_ptr->reference_count--;
-
-    if (msg_ptr->reference_count == 0)
+    if ((rtcan_h == NULL) || (msg_ptr == NULL))
     {
-        tx_block_release(msg_ptr);
+        return RTCAN_ERROR;
+    }
+
+    uint32_t prev_count = atomic_load(&msg_ptr->reference_count);
+    do {
+        if (prev_count == 0U)
+        {
+            return RTCAN_ERROR;
+        }
+    } while (!atomic_compare_exchange_weak(&msg_ptr->reference_count, &prev_count, prev_count - 1U));
+
+    if (prev_count == 1U)
+    {
+        (void) rtcan_os_block_release(rtcan_h->rx_msg_pool, msg_ptr);
     }
 
     return RTCAN_OK;
@@ -773,61 +613,88 @@ rtcan_status_t rtcan_msg_consumed(rtcan_handle_t* rtcan_h,
 
 /**
  * @brief       Entry function for RTCAN receive service thread
- * 
- * @param[in]   input   RTCAN handler
  */
-static void rtcan_rx_thread_entry(ULONG input)
+static void rtcan_rx_thread_entry(void* arg)
 {
-    rtcan_handle_t* rtcan_h = (rtcan_handle_t*) input;
+    rtcan_handle_t* rtcan_h = (rtcan_handle_t*) arg;
 
     while (1)
     {
-        atomic_store(&rtcan_h->rx_ready, true);
+        /* Wait for incoming message notification */
+        rtcan_msg_t* msg_ptr = NULL;
+        rtcan_osal_status_t os_status = rtcan_os_queue_receive(rtcan_h->rx_notif_queue,
+                                                               (void*) &msg_ptr,
+                                                               RTCAN_OS_WAIT_FOREVER);
 
-        // wait for message
-        rtcan_msg_t* msg_ptr;
-
-        UINT tx_status = tx_queue_receive(&rtcan_h->rx_notif_queue,
-                                          (void*) &msg_ptr,
-                                          TX_WAIT_FOREVER);
-
-        ADD_ERROR_IF(tx_status != TX_SUCCESS, RTCAN_ERROR_INTERNAL, rtcan_h);
-
-        // distribute
-        if (no_errors(rtcan_h))
+        if ((os_status == RTCAN_OS_OK) && (msg_ptr != NULL))
         {
-            rtcan_hashmap_node_t* node_ptr = find_hashmap_node(rtcan_h,
-                                                               msg_ptr->identifier);
-
-            if (node_ptr != NULL)
+            /* Check if the message is a standard ID within bounds */
+            if ((!msg_ptr->extended) && (msg_ptr->identifier < 2048U))
             {
-                rtcan_subscriber_t* subscriber_ptr = node_ptr->first_subscriber_ptr;
-
-                while (subscriber_ptr != NULL)
+                if (rtcan_os_sem_acquire(rtcan_h->subscriber_mutex, RTCAN_OS_WAIT_FOREVER) != RTCAN_OS_OK)
                 {
-                    msg_ptr->reference_count++;
-                    
-                    tx_status = tx_queue_send(subscriber_ptr->queue_ptr,
-                                              &msg_ptr,
-                                              TX_NO_WAIT);
+                    (void) rtcan_os_block_release(rtcan_h->rx_msg_pool, msg_ptr);
+                }
+                else
+                {
+                    rtcan_subscriber_t* subscriber_ptr = rtcan_h->subscriber_lut[msg_ptr->identifier];
+                    uint32_t subscriber_count = 0U;
 
-                    if (tx_status != TX_SUCCESS)
+                    /* 1. Count subscribers first */
+                    rtcan_subscriber_t* sub = subscriber_ptr;
+                    while (sub != NULL)
                     {
-                        msg_ptr->reference_count--;
+                        subscriber_count++;
+                        sub = sub->next_subscriber_ptr;
                     }
 
-                    subscriber_ptr = subscriber_ptr->next_subscriber_ptr;
-                }
+                    if (subscriber_count > 0U)
+                    {
+                        /* Set reference count before posting to queues to avoid race conditions */
+                        atomic_store(&msg_ptr->reference_count, subscriber_count);
 
-                // catch for errors sending in queue
-                if (msg_ptr->reference_count == 0)
-                {
-                    tx_block_release(msg_ptr);
+                        /* 2. Dispatch to subscribers */
+                        sub = subscriber_ptr;
+                        while (sub != NULL)
+                        {
+                            rtcan_osal_status_t queue_status = rtcan_os_queue_send(sub->queue_ptr,
+                                                                                   &msg_ptr,
+                                                                                   RTCAN_OS_NO_WAIT);
+
+                            if (queue_status != RTCAN_OS_OK)
+                            {
+                                uint32_t prev_count = atomic_load(&msg_ptr->reference_count);
+                                do {
+                                    if (prev_count == 0U)
+                                    {
+                                        break;
+                                    }
+                                } while (!atomic_compare_exchange_weak(&msg_ptr->reference_count,
+                                                                       &prev_count,
+                                                                       prev_count - 1U));
+                                if (prev_count == 1U)
+                                {
+                                    (void) rtcan_os_block_release(rtcan_h->rx_msg_pool, msg_ptr);
+                                }
+                            }
+
+                            sub = sub->next_subscriber_ptr;
+                        }
+                    }
+                    else
+                    {
+                        /* No subscribers, release block */
+                        (void) rtcan_os_block_release(rtcan_h->rx_msg_pool, msg_ptr);
+                    }
+
+                    rtcan_osal_status_t rel_status = rtcan_os_sem_release(rtcan_h->subscriber_mutex);
+                    add_error_if(rel_status != RTCAN_OS_OK, RTCAN_ERROR_INTERNAL, rtcan_h);
                 }
             }
-            else // don't care about this message
+            else
             {
-                tx_block_release(msg_ptr);
+                /* Extended IDs or out-of-bounds IDs are not supported in the LUT, release block */
+                (void) rtcan_os_block_release(rtcan_h->rx_msg_pool, msg_ptr);
             }
         }
     }
@@ -836,69 +703,46 @@ static void rtcan_rx_thread_entry(ULONG input)
 //======================================================================== error
 
 /**
- * @brief       Handles HAL CAN errors
- * 
- * @note        `HAL_CAN_ERROR_BD` and `HAL_CAN_ERROR_CRC` are much more likely
- *              to happen in the actual car where the noise level is higher.
- *  
- *              Note also that it is possible for multiple errors to happen at
- *              once so the error code will be equal to a bitwise combination 
- *              of the HAL error codes.
+ * @brief       Handles HAL CAN errors and releases mailbox semaphore if needed
  * 
  * @param[in]   rtcan_h     RTCAN handle
  * @param[in]   can_h       CAN handle
  */
 rtcan_status_t rtcan_handle_hal_error(rtcan_handle_t* rtcan_h,
-                                      CAN_HandleTypeDef* can_h)
+                                       CAN_HandleTypeDef* can_h)
 {
-    rtcan_status_t status = RTCAN_OK;
-
-    if (can_h == rtcan_h->hcan)
+    if ((rtcan_h == NULL) || (can_h == NULL) || (rtcan_h->hcan != can_h))
     {
-        const uint32_t tx_errors[] = {
-            HAL_CAN_ERROR_TX_TERR0,
-            HAL_CAN_ERROR_TX_TERR1,
-            HAL_CAN_ERROR_TX_TERR2,
-            HAL_CAN_ERROR_TX_ALST0,
-            HAL_CAN_ERROR_TX_ALST1,
-            HAL_CAN_ERROR_TX_ALST2,
-            HAL_CAN_ERROR_BD,
-            HAL_CAN_ERROR_CRC,
-            HAL_CAN_ERROR_ACK
-        };
-
-// #if (1)
-
-        tx_semaphore_put(&rtcan_h->tx_mailbox_sem);
-        HAL_CAN_ResetError(rtcan_h->hcan);
-#ifdef AHDFKJSD
-        uint32_t error = HAL_CAN_GetError(rtcan_h->hcan);
-        bool error_handled = false;
-
-        for (uint32_t i = 0; i < sizeof(tx_errors)/sizeof(tx_errors[0]); i++)
-        {
-            if (error & tx_errors[i]) // check the single bit
-            {
-                tx_semaphore_put(&rtcan_h->tx_mailbox_sem);
-                HAL_CAN_ResetError(rtcan_h->hcan);
-                error_handled = true;
-                break;
-            }
-        }
-
-        // (void) error_handled;
-        // if (!error_handled)
-        // {
-        //     tx_semaphore_put(&rtcan_h->tx_mailbox_sem);
-        //     HAL_CAN_ResetError(rtcan_h->hcan);
-        // }
-
-        // // unhandled/unknown errors
-        // ADD_ERROR_IF(!error_handled, RTCAN_ERROR_INTERNAL, rtcan_h);
-#endif
+        return RTCAN_ERROR;
     }
 
-    return status;
+    /* Under NART, a TX mailbox that loses arbitration (ALST) or hits a bus
+       error (TERR) is dropped by hardware without ever invoking
+       HAL_CAN_TxMailboxXAbortCallback — HAL_CAN_IRQHandler only calls the
+       abort callback for an explicit software abort request, never for
+       ALST/TERR. The tx_mailbox_sem permit taken for that mailbox in
+       transmit_internal() would otherwise never be returned, permanently
+       leaking one count per event and eventually deadlocking the tx thread.
+       Release one permit per failed-mailbox bit before clearing the error. */
+    static const uint32_t tx_fail_bits[] = {
+        HAL_CAN_ERROR_TX_ALST0, HAL_CAN_ERROR_TX_TERR0,
+        HAL_CAN_ERROR_TX_ALST1, HAL_CAN_ERROR_TX_TERR1,
+        HAL_CAN_ERROR_TX_ALST2, HAL_CAN_ERROR_TX_TERR2
+    };
+
+    uint32_t error = HAL_CAN_GetError(can_h);
+
+    for (size_t i = 0; i < (sizeof(tx_fail_bits) / sizeof(tx_fail_bits[0])); i++)
+    {
+        if ((error & tx_fail_bits[i]) != 0U)
+        {
+            (void) rtcan_os_sem_release(rtcan_h->tx_mailbox_sem);
+        }
+    }
+
+    rtcan_h->hcan->ErrorCode = HAL_CAN_ERROR_NONE;
+
+    return RTCAN_OK;
 }
 
 //====================================================================== utility
@@ -910,23 +754,23 @@ rtcan_status_t rtcan_handle_hal_error(rtcan_handle_t* rtcan_h,
  */
 uint32_t rtcan_get_error(rtcan_handle_t* rtcan_h)
 {
-    return rtcan_h->err;
+    if (rtcan_h == NULL)
+    {
+        return RTCAN_ERROR_ARG;
+    }
+    return atomic_load(&rtcan_h->err);
 }
 
 /**
- * @brief       Returns true if the RTCAN instance has encountered an error
- *
- * @param[in]   rtcan_h   RTCAN handle
+ * @brief       Returns true if the RTCAN instance has encountered no error
  */
-static bool no_errors(rtcan_handle_t* rtcan_h)
+static bool no_errors(const rtcan_handle_t* rtcan_h)
 {
-    return (rtcan_h->err == RTCAN_ERROR_NONE);
+    return (atomic_load(&rtcan_h->err) == RTCAN_ERROR_NONE);
 }
 
 /**
  * @brief       Create a status code based on the current error state
- *
- * @param[in]   rtcan_h   RTCAN handle
  */
 static rtcan_status_t create_status(rtcan_handle_t* rtcan_h)
 {
